@@ -1,6 +1,5 @@
 import { Expose, Type } from "class-transformer";
-import { RepositoryEntity } from "./respository.entity";
-
+import { RepositoryEntity } from "./repository.entity";
 @Expose()
 export class RepositoryStatsEntity {
   @Type(() => RepositoryEntity)

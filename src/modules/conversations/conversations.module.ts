@@ -1,15 +1,15 @@
-import { Module, forwardRef } from "@nestjs/common";
+import { Module } from "@nestjs/common";
+import { McpModule as RekogMcpModule } from "@rekog/mcp-nest";
 import { ConversationsService } from "./conversations.service";
 import { ConversationsController } from "./conversations.controller";
+import { ConversationsMcp } from "./conversations.mcp";
 import { PrismaModule } from "../../prisma/prisma.module";
 import { OpenAIModule } from "../openai/openai.module";
-import { ChatModule } from "../chat/chat.module";
-import { AgentModule } from "../agent/agent.module";
 
 @Module({
-  imports: [PrismaModule, OpenAIModule, forwardRef(() => ChatModule), forwardRef(() => AgentModule)],
+  imports: [PrismaModule, OpenAIModule, RekogMcpModule.forFeature([ConversationsMcp], "code-chat")],
   controllers: [ConversationsController],
-  providers: [ConversationsService],
+  providers: [ConversationsService, ConversationsMcp],
   exports: [ConversationsService],
 })
 export class ConversationsModule {}

@@ -8,6 +8,10 @@ import type { LLMMessage } from "../llm/types/llm-message.type";
 import type { LLMTool } from "../llm/types/llm-tool.type";
 import type { LLMChatResponse } from "../llm/types/llm-chat-response.type";
 
+// exported so IndexingCostService can tokenize the exact prompt used at indexing time
+export const SUMMARY_SYSTEM_PROMPT =
+  "You are a helpful assistant that generates concise file summaries with embedded tables of contents.";
+
 @Injectable()
 export class OpenAIService {
   readonly openai: OpenAI;
@@ -20,7 +24,7 @@ export class OpenAIService {
     this.openai = new OpenAI({ apiKey });
   }
 
-  async generateEmbedding({ input, model = "text-embedding-3-small" }: GenerateEmbeddingOptions): Promise<number[]> {
+  async generateEmbedding({ input, model = "text-embedding-3-large" }: GenerateEmbeddingOptions): Promise<number[]> {
     const response = await this.openai.embeddings.create({
       input,
       model,
@@ -139,7 +143,7 @@ export class OpenAIService {
     content,
     language,
     filePath,
-    model = "o4-mini",
+    model = "gpt-4o-mini",
   }: GenerateSummaryOptions): Promise<string> {
     const prompt = this._buildSummaryPrompt(language, filePath, content);
 
@@ -148,8 +152,7 @@ export class OpenAIService {
       messages: [
         {
           role: "system",
-          content:
-            "You are a helpful assistant that generates concise file summaries with embedded tables of contents.",
+          content: SUMMARY_SYSTEM_PROMPT,
         },
         {
           role: "user",
@@ -169,8 +172,8 @@ export class OpenAIService {
   }
 
   _buildSummaryPrompt(language: string, filePath: string, content: string): string {
-    const truncatedContent = content.length > 100000 ? content.substring(0, 100000) + "..." : content;
-
+    // gpt-4o-mini handles 128K tokens of context — full file content is sent without truncation
+    // pathologically large files are filtered upstream in the indexing pipeline
     if (language === "typescript" || language === "javascript" || language === "tsx" || language === "jsx") {
       const isReact = language === "tsx" || language === "jsx";
 
@@ -188,7 +191,7 @@ Format your response as:
 
 File content:
 \`\`\`${language}
-${truncatedContent}
+${content}
 \`\`\`
 
 Keep the summary under 300 words.`;
@@ -207,7 +210,7 @@ Format your response as:
 
 File content:
 \`\`\`
-${truncatedContent}
+${content}
 \`\`\`
 
 Keep the summary under 300 words.`;
@@ -226,7 +229,7 @@ Format your response as:
 
 File content:
 \`\`\`markdown
-${truncatedContent}
+${content}
 \`\`\`
 
 Keep the summary under 300 words.`;
@@ -245,7 +248,7 @@ Format your response as:
 
 File content:
 \`\`\`
-${truncatedContent}
+${content}
 \`\`\`
 
 Keep the summary under 300 words.`;
@@ -263,7 +266,7 @@ Format your response as:
 
 File content:
 \`\`\`
-${truncatedContent}
+${content}
 \`\`\`
 
 Keep the summary under 300 words.`;

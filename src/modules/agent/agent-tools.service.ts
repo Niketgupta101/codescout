@@ -405,14 +405,14 @@ export class AgentToolsService {
           cf."fullPath" as path,
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
-          1 - (cf."summaryEmbedding" <=> $1::vector) as similarity
+          1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
         FROM "CodeFile" cf
         LEFT JOIN "Document" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = '${projectId}'
           AND cf."summaryEmbedding" IS NOT NULL
           ${documentTypeFilter}
-        ORDER BY cf."summaryEmbedding" <=> $1::vector
+        ORDER BY cf."summaryEmbedding" <=> $1::halfvec
         LIMIT $2
       `,
         ...params,

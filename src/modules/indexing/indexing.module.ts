@@ -1,5 +1,6 @@
 import { forwardRef, Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { IndexingCostService } from "./indexing-cost.service";
 import { IndexingService } from "./indexing.service";
 import { PrismaModule } from "../../prisma/prisma.module";
 import { ParsersModule } from "../parsers/parsers.module";
@@ -18,7 +19,7 @@ import { OpenAIModule } from "../openai/openai.module";
     forwardRef(() => DocumentsModule),
     OpenAIModule,
   ],
-  providers: [IndexingService],
-  exports: [IndexingService],
+  providers: [IndexingService, IndexingCostService],
+  exports: [IndexingService, IndexingCostService],
 })
 export class IndexingModule {}

@@ -163,7 +163,7 @@ export class ConversationsService {
   async updateMessageEmbedding(messageId: string, embedding: number[]): Promise<void> {
     await this.prisma.$executeRaw`
       UPDATE "Message"
-      SET "contentEmbedding" = ${`[${embedding.join(",")}]`}::vector
+      SET "contentEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
       WHERE id = ${messageId}::uuid
     `;
   }
@@ -249,7 +249,7 @@ export class ConversationsService {
         FROM "Message"
         WHERE "conversationId" = $1
           AND "contentEmbedding" IS NOT NULL
-        ORDER BY "contentEmbedding" <=> $2::vector
+        ORDER BY "contentEmbedding" <=> $2::halfvec
         LIMIT $3
         `,
         conversationId,

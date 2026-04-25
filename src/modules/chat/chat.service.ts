@@ -1,6 +1,6 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { AgentService } from "../agent/agent.service";
-import type { ConversationsService } from "../conversations/conversations.service";
+import { ConversationsService } from "../conversations/conversations.service";
 import { OpenAIService } from "../openai/openai.service";
 import type { LLMProvider } from "../llm/types/llm-provider.type";
 import type { ChatRequest } from "./types/chat-request.type";
@@ -13,19 +13,13 @@ import type { ChatResponse } from "./types/chat-response.type";
 @Injectable()
 export class ChatService {
   readonly logger = new Logger(ChatService.name);
-  conversationsService: ConversationsService | undefined;
 
   constructor(
     readonly agentService: AgentService,
     readonly openaiService: OpenAIService,
+    @Inject(forwardRef(() => ConversationsService))
+    readonly conversationsService: ConversationsService,
   ) {}
-
-  /**
-   * Set conversations service (circular dependency workaround)
-   */
-  setConversationsService(service: ConversationsService): void {
-    this.conversationsService = service;
-  }
 
   /**
    * Handle chat query using agent (no conversation context)
@@ -54,10 +48,6 @@ export class ChatService {
       conversationTitle?: string;
     },
   ): Promise<{ conversationId: string; message: ChatResponse }> {
-    if (!this.conversationsService) {
-      throw new Error("ConversationsService not initialized");
-    }
-
     let conversationId = request.conversationId;
 
     // create new conversation if conversationId not provided
@@ -88,10 +78,6 @@ export class ChatService {
    * Handle chat query in conversation thread
    */
   async queryInConversation(projectId: string, conversationId: string, request: ChatRequest): Promise<ChatResponse> {
-    if (!this.conversationsService) {
-      throw new Error("ConversationsService not initialized");
-    }
-
     // 1. Get conversation's model and provider
     const { model, provider } = await this.conversationsService.getConversationModel(conversationId);
 

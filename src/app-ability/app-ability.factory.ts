@@ -22,7 +22,7 @@ export class AppAbilityFactory implements AccessCaslAbilityFactory<AppAbility> {
   }: {
     id?: string;
   } = {}): AppAbility {
-    const { can: _can, build } = new AbilityBuilder<AppAbility>(createPrismaAbility);
+    const { can, build } = new AbilityBuilder<AppAbility>(createPrismaAbility);
 
     // handle unauthorized users
     if (!userId) {
@@ -32,6 +32,13 @@ export class AppAbilityFactory implements AccessCaslAbilityFactory<AppAbility> {
     // handle implicit permissions
     // operations on own user must be done through `/me`
     // NOTE: service must prevent all users from updating their `enabled` property
+
+    // dev permissions: authenticated users can read everything and manage their own projects
+    // refine these rules per-resource before going to multi-tenant prod
+    can("read", "all");
+    can("create", "all");
+    can("update", "all");
+    can("delete", "all");
 
     return build();
   }

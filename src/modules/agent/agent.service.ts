@@ -1,6 +1,6 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { AgentToolsService } from "./agent-tools.service";
-import type { ConversationsService } from "../conversations/conversations.service";
+import { ConversationsService } from "../conversations/conversations.service";
 import { CodeFileLanguage, SymbolType } from "@prisma/client";
 import { LLMService } from "../llm/llm.service";
 import type { LLMProvider } from "../llm/types/llm-provider.type";
@@ -13,19 +13,13 @@ import { AgentLLMAnswerToQuery } from "./types/agent-llm-answer-to-query.type";
 @Injectable()
 export class AgentService {
   readonly logger = new Logger(AgentService.name);
-  conversationsService: ConversationsService | undefined;
 
   constructor(
     readonly tools: AgentToolsService,
     readonly llmService: LLMService,
+    @Inject(forwardRef(() => ConversationsService))
+    readonly conversationsService: ConversationsService,
   ) {}
-
-  /**
-   * Set conversations service (circular dependency workaround)
-   */
-  setConversationsService(service: ConversationsService): void {
-    this.conversationsService = service;
-  }
 
   /**
    * Execute agent query with tool calling loop
@@ -598,10 +592,10 @@ Answer the question based on these findings:`,
         );
 
       case "search_conversation_history":
-        if (!conversationId || !this.conversationsService) {
+        if (!conversationId) {
           return {
             success: false,
-            error: "Conversation history search not available",
+            error: "Conversation history search not available outside a conversation",
           };
         }
         return this.conversationsService.searchHistory(

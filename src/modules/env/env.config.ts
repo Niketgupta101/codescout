@@ -55,4 +55,10 @@ export class EnvConfig {
 
   @IsString()
   ANTHROPIC_API_KEY: string;
+
+  // optional fallback access token for MCP stdio transport
+  // for HTTP+SSE the token is read from the Authorization header
+  @IsOptional()
+  @IsString()
+  MCP_AUTH_TOKEN?: string;
 }

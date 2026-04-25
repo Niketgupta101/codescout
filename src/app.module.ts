@@ -13,6 +13,7 @@ import { ChatModule } from "./modules/chat/chat.module";
 import { ConversationsModule } from "./modules/conversations/conversations.module";
 import { AnthropicModule } from "./modules/anthropic/anthropic.module";
 import { LLMModule } from "./modules/llm/llm.module";
+import { McpModule } from "./modules/mcp/mcp.module";
 import { AppExceptionFilter, EXCEPTION_FACTORY } from "./providers/app-exception.filter";
 import { LocaleHttpExceptionFactory } from "./plugins/locale/nest/locale-http-exception.factory";
 import { AppResponseSerializerInterceptor } from "./providers/app-response-serializer.interceptor";
@@ -70,6 +71,7 @@ import { RequestWithUser } from "./modules/auth/types/request-with-user.type";
     AgentModule,
     ChatModule,
     ConversationsModule,
+    McpModule,
   ],
   controllers: [AppController],
   providers: [

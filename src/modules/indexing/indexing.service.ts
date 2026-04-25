@@ -11,6 +11,7 @@ import type { ParsedDocument } from "../parsers/types/parsed-document.type";
 import { DocumentIndexingOptions } from "./types/document-indexing-options.type";
 import { IndexingResult } from "./types/indexing-result.type";
 import { RepositoryIndexingOptions } from "./types/repository-indexing-options.type";
+import { buildRepositoryIndexFileFilter } from "./utils/repository-file-filter.util";
 
 const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   function: SymbolType.function,
@@ -208,39 +209,8 @@ export class IndexingService {
       // update status: indexing
       await this.repositoriesService.update(repository.id, { lastCommitHash: commitHash, status: "indexing" });
 
-      // list code files
-      const files = await this.githubService.listCodeFiles(clonePath, {
-        include: [
-          "**/*.ts",
-          "**/*.tsx",
-          "**/*.js",
-          "**/*.jsx",
-          "**/*.json",
-          "**/*.md",
-          "**/*.markdown",
-          "**/*.yml",
-          "**/*.yaml",
-          "**/*.prisma",
-        ],
-        exclude: [
-          "node_modules/**",
-          "dist/**",
-          "build/**",
-          "**/.git/**",
-          "**/.vscode/**",
-          "**/.gitignore",
-          "**/.npmrc",
-          "**/.nvmrc",
-          "**/.env*",
-          "**/.prettierrc*",
-          "**/.eslintrc*",
-          "**/.editorconfig",
-          "**/package-lock.json",
-          "**/yarn.lock",
-          ...(includeTests ? [] : ["**/*.spec.ts", "**/*.test.ts"]),
-        ],
-        respectGitignore: true,
-      });
+      // list code files using the shared filter (matches what IndexingCostService estimates against)
+      const files = await this.githubService.listCodeFiles(clonePath, buildRepositoryIndexFileFilter({ includeTests }));
 
       this.logger.log(`Found ${files.length} code files to index`);
 
@@ -582,7 +552,7 @@ export class IndexingService {
   async _updateVectorEmbedding(codeFileId: string, embedding: number[]): Promise<void> {
     await this.prisma.$executeRaw`
       UPDATE "CodeFile"
-      SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::vector
+      SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
       WHERE id = ${codeFileId}::uuid
     `;
   }

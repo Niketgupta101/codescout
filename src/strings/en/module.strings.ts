@@ -44,4 +44,9 @@ export const moduleStringsEn = {
   document: {
     noFilesUploadedError: "No files uploaded",
   },
+  mcp: {
+    missingAccessTokenError: "Authentication is required. Provide a JWT in the Authorization header or set MCP_AUTH_TOKEN.",
+    missingProjectIdentifierError: "Either projectId or gitRemoteUrl must be provided.",
+    projectNotFoundError: "Project not found or you do not have access to it.",
+  },
 };
