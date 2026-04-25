@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String        @id @default(uuid())
+  name      String        @default("") // computed
+  firstName String        @default("")
+  lastName  String        @default("")
+  email     String        @unique
+  enabled   Boolean
+  createdAt DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime      @updatedAt @db.Timestamptz(3)
+  deleted   Boolean       @default(false)
+  deletedAt DateTime?     @db.Timestamptz(3)
+  password  UserPassword?
+  sessions  UserSession[]
+}
+
+model UserPassword {
+  id              String   @id @default(uuid())
+  user            User     @relation(fields: [userId], references: [id])
+  userId          String   @unique
+  passwordHash    String
+  attempts        Int      @default(0)
+  lastAttemptedAt DateTime @default(now()) @db.Timestamptz(3)
+  lastChangedAt   DateTime @default(now()) @db.Timestamptz(3)
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model UserSession {
+  id                    String   @id
+  user                  User     @relation(fields: [userId], references: [id])
+  userId                String
+  refreshTokenHash      String
+  refreshTokenExpiresAt DateTime @default(now()) @db.Timestamptz(3)
+  createdAt             DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model Project {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String         @unique
+  description   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  codeFiles     CodeFile[]
+  symbols       Symbol[]
+  repositories  Repository[]
+  documents     Document[]
+  conversations Conversation[]
+}
+
+enum CodeFileLanguage {
+  typescript
+  javascript
+  csv
+  markdown
+  pdf
+  json
+  yaml
+  plaintext
+  prisma
+}
+
+model CodeFile {
+  id               String                       @id @default(uuid()) @db.Uuid
+  projectId        String                       @db.Uuid
+  project          Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  repositoryId     String?                      @db.Uuid
+  repository       Repository?                  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  documentId       String?                      @db.Uuid
+  document         Document?                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  fullPath         String
+  language         CodeFileLanguage
+  rawContent       String                       @db.Text
+  summary          String?                      @db.Text
+  summaryEmbedding Unsupported("vector(1536)")?
+  metadata         Json?
+  checksum         String?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  symbols          Symbol[]
+
+  @@unique([projectId, fullPath])
+  @@index([projectId, language])
+  @@index([repositoryId])
+  @@index([documentId])
+  @@index([checksum])
+}
+
+enum SymbolType {
+  heading
+  term
+  function
+  class
+  variable
+  interface
+  type
+  enum
+  module
+}
+
+model Symbol {
+  id         String     @id @default(uuid()) @db.Uuid
+  projectId  String     @db.Uuid
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  codeFileId String     @db.Uuid
+  codeFile   CodeFile   @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
+  name       String
+  type       SymbolType
+  context    String?    @db.Text
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@index([projectId, type])
+  @@index([projectId, name])
+  @@index([name])
+  @@index([codeFileId])
+}
+
+enum RepositoryType {
+  backendCodebase
+  webCodebase
+  appCodebase
+  custom
+}
+
+enum RepositoryStatus {
+  pending
+  cloning
+  indexing
+  completed
+  failed
+}
+
+model Repository {
+  id             String           @id @default(uuid()) @db.Uuid
+  projectId      String           @db.Uuid
+  project        Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name           String
+  url            String
+  branch         String           @default("main")
+  lastCommitHash String?
+  status         RepositoryStatus @default(pending)
+  type           RepositoryType   @default(custom)
+  metadata       Json?
+  error          String?          @db.Text
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  codeFiles      CodeFile[]
+}
+
+enum DocumentFormat {
+  csv
+  markdown
+  pdf
+}
+
+enum DocumentType {
+  technicalSpecification
+  userStories
+  meetingNotes
+  custom
+}
+
+enum DocumentStatus {
+  pending
+  indexing
+  completed
+  failed
+}
+
+model Document {
+  id           String         @id @default(uuid()) @db.Uuid
+  projectId    String         @db.Uuid
+  project      Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  filename     String
+  format       DocumentFormat
+  status       DocumentStatus @default(pending)
+  documentType DocumentType   @default(custom)
+  metadata     Json?
+  error        String?        @db.Text
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  codeFiles    CodeFile[]
+}
+
+model Conversation {
+  id        String    @id @default(uuid()) @db.Uuid
+  projectId String    @db.Uuid
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title     String
+  model     String    @default("gpt-4o-mini")
+  provider  String    @default("openai")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@index([projectId, createdAt])
+}
+
+model Message {
+  id               String                       @id @default(uuid()) @db.Uuid
+  conversationId   String                       @db.Uuid
+  conversation     Conversation                 @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  assitant         Boolean                      @default(false)
+  content          String                       @db.Text
+  contentEmbedding Unsupported("vector(1536)")?
+  toolCalls        Json?
+  metadata         Json?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+}
