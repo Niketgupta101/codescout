@@ -28,6 +28,7 @@ import { EnvService } from "./modules/env/env.service";
 import { AppLogger } from "./providers/app-logger.service";
 import { MeModule } from "./modules/me/me.module";
 import { UserModule } from "./modules/user/user.module";
+import { UserApiKeyModule } from "./modules/user-api-key/user-api-key.module";
 import { AccessModule } from "./libraries/access";
 import { AppAbilityModule } from "./app-ability/app-ability.module";
 import { AppAbilityFactory } from "./app-ability/app-ability.factory";
@@ -62,6 +63,7 @@ import { RequestWithUser } from "./modules/auth/types/request-with-user.type";
     AuthModule,
     MeModule,
     UserModule,
+    UserApiKeyModule,
     ProjectsModule,
     GithubModule,
     RepositoriesModule,

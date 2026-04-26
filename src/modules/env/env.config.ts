@@ -44,6 +44,13 @@ export class EnvConfig {
   @IsBoolean()
   SECURE_COOKIES?: boolean;
 
+  // comma-separated list of origins allowed to make credentialed requests, e.g. "https://app.example.com,http://localhost:3000"
+  // requests with no Origin header (server-to-server, MCP clients) bypass this check
+  // when unset, no cross-origin browser requests are allowed (safer default than allow-all)
+  @IsOptional()
+  @IsString()
+  CORS_ORIGINS_ALLOWED?: string;
+
   @IsNumber()
   THROTTLE_TTL: number;
 

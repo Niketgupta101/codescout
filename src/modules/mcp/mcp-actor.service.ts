@@ -5,7 +5,10 @@ import { AccessContextService } from "src/libraries/access/services/access-conte
 import { makeActor } from "src/modules/actor/actor.factory";
 import { Actor } from "src/modules/actor/types/actor.type";
 import { AuthService } from "src/modules/auth/auth.service";
+import { AuthUser } from "src/modules/auth/types/auth-user.type";
 import { EnvService } from "src/modules/env/env.service";
+import { UserApiKeyService } from "src/modules/user-api-key/user-api-key.service";
+import { USER_API_KEY_PREFIX } from "src/modules/user-api-key/user-api-key.constants";
 import { LocaleException } from "src/plugins/locale/nest/locale.exception";
 import { PrismaService } from "src/prisma/prisma.service";
 import { McpProjectResolverInput } from "./types/mcp-project-resolver-input.type";
@@ -22,14 +25,9 @@ export class McpActorService {
     readonly accessContextService: AccessContextService<AppAbility>,
     readonly envService: EnvService,
     readonly prismaService: PrismaService,
+    readonly userApiKeyService: UserApiKeyService,
   ) {}
 
-  /**
-   * Resolves an actor from the MCP request.
-   * Reads the JWT from the Authorization header (HTTP+SSE) or the MCP_AUTH_TOKEN env var (stdio).
-   * @param request - Raw HTTP request from the MCP transport, undefined for stdio
-   * @returns Actor for downstream service calls
-   */
   async actorResolve(request: McpToolRequest | undefined): Promise<Actor> {
     const accessToken = this._accessTokenExtract(request);
 
@@ -38,9 +36,19 @@ export class McpActorService {
       throw LocaleException.unauthorized({ message: "module.mcp.missingAccessTokenError" });
     }
 
-    const user = await this.authService.verifySession({ accessToken });
+    const user = await this._userResolveFromToken(accessToken);
     const accessContext = this.accessContextService.createForUser(user);
     return makeActor({ user, accessContext });
+  }
+
+  async _userResolveFromToken(accessToken: string): Promise<AuthUser> {
+    // long-lived API keys carry the cck_ brand prefix; everything else is treated as a JWT
+    // both paths return an AuthUser shape; api-key auth has session=undefined and is rejected by /me-style endpoints
+    if (accessToken.startsWith(USER_API_KEY_PREFIX)) {
+      return this.userApiKeyService.userFindByApiKey(accessToken);
+    }
+
+    return this.authService.verifySession({ accessToken });
   }
 
   /**

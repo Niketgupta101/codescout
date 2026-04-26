@@ -20,6 +20,24 @@ model User {
   deletedAt DateTime?     @db.Timestamptz(3)
   password  UserPassword?
   sessions  UserSession[]
+  apiKeys   UserApiKey[]
+}
+
+model UserApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  // first chars of the secret used as an indexed lookup handle and for UI display
+  prefix     String
+  // argon2 hash of the full key (including the cck_ brand prefix)
+  keyHash    String
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([userId])
+  @@index([prefix])
 }
 
 model UserPassword {

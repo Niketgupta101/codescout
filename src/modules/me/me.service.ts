@@ -54,6 +54,12 @@ export class MeService {
         throw LocaleException.badRequest({ message: "module.me.newPasswordSameAsOldPasswordError" });
       }
 
+      // /me endpoints run on JWT auth so actor.session is always present
+      // explicit guard keeps the type system honest after AuthUser.session became optional to support API-key auth
+      if (!actor.session) {
+        throw LocaleException.unauthorized();
+      }
+
       // update password
       await this.authService.updatePassword({
         userId: actor.id,

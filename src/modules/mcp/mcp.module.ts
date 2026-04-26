@@ -4,6 +4,7 @@ import { AccessModule } from "src/libraries/access/access.module";
 import { AppAbilityModule } from "src/app-ability/app-ability.module";
 import { AuthModule } from "src/modules/auth/auth.module";
 import { PrismaModule } from "src/prisma/prisma.module";
+import { UserApiKeyModule } from "src/modules/user-api-key/user-api-key.module";
 import { McpActorService } from "./mcp-actor.service";
 
 @Global()
@@ -25,6 +26,7 @@ import { McpActorService } from "./mcp-actor.service";
     AppAbilityModule,
     AuthModule,
     PrismaModule,
+    UserApiKeyModule,
   ],
   providers: [McpActorService],
   exports: [McpActorService],
