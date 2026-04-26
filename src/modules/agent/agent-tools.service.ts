@@ -5,7 +5,6 @@ import type { ToolResult } from "./types/tool-result.type";
 import type { FileInfo } from "./types/file-info.type";
 import type { SymbolInfo } from "./types/symbol-info.type";
 import type { DirectoryNode } from "./types/directory-node.type";
-import type { ProjectStats } from "./types/project-stats.type";
 import type { FileSearchResult } from "./types/file-search-result.type";
 import type { AgentToolReadFileResult } from "./types/agent-tool-read-file-result.type";
 import type { AgentToolCodeMatch } from "./types/agent-tool-code-match.type";
@@ -259,61 +258,6 @@ export class AgentToolsService {
       };
     } catch (error) {
       this.logger.error("Failed to get file tree", error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  async getStats(projectId: string): Promise<ToolResult<ProjectStats>> {
-    try {
-      this.logger.debug(`getStats()`);
-
-      const [filesByLanguage, symbolsByType, totalFiles, totalSymbols] = await Promise.all([
-        this.prisma.codeFile.groupBy({
-          by: ["language"],
-          where: { projectId },
-          _count: true,
-        }),
-        this.prisma.symbol.groupBy({
-          by: ["type"],
-          where: { projectId },
-          _count: true,
-        }),
-        this.prisma.codeFile.count({
-          where: { projectId },
-        }),
-        this.prisma.symbol.count({
-          where: { projectId },
-        }),
-      ]);
-
-      const stats: ProjectStats = {
-        totalFiles,
-        filesByLanguage: filesByLanguage.reduce(
-          (acc, item) => {
-            acc[item.language] = item._count;
-            return acc;
-          },
-          {} as Record<string, number>,
-        ),
-        totalSymbols,
-        symbolsByType: symbolsByType.reduce(
-          (acc, item) => {
-            acc[item.type] = item._count;
-            return acc;
-          },
-          {} as Record<string, number>,
-        ),
-      };
-
-      return {
-        success: true,
-        data: stats,
-      };
-    } catch (error) {
-      this.logger.error("Failed to get stats", error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),

@@ -7,7 +7,6 @@ import { getTempDirectories, cleanupTempDirectories } from "src/utils/file-uploa
 import type { DocumentIndexingOptions } from "../indexing/types/document-indexing-options.type";
 import type { CreateDocumentDto } from "./dtos/create-document.dto";
 import type { UpdateDocumentStatusDto } from "./dtos/update-document-status.dto";
-import type { DocumentStats } from "./types/document-stats.type";
 import type { IndexDocumentsOptions } from "./types/index-documents-options.type";
 
 @Injectable()
@@ -141,39 +140,5 @@ export class DocumentsService {
     });
 
     return document;
-  }
-
-  async getStats(projectId: string, documentId: string): Promise<DocumentStats> {
-    const document = await this.findOne(projectId, documentId);
-
-    const fileCount = await this.prisma.codeFile.count({
-      where: {
-        documentId,
-        projectId,
-      },
-    });
-
-    const symbolCount = await this.prisma.symbol.count({
-      where: {
-        projectId,
-        codeFile: {
-          documentId,
-        },
-      },
-    });
-
-    return {
-      document: {
-        id: document.id,
-        projectId: document.projectId,
-        filename: document.filename,
-        format: document.format,
-        status: document.status,
-        createdAt: document.createdAt,
-        updatedAt: document.updatedAt,
-      },
-      fileCount,
-      symbolCount,
-    };
   }
 }

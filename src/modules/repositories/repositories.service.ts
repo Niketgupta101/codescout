@@ -1,6 +1,6 @@
 import { Injectable, Logger, Inject, forwardRef } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
-import { RepositoryStatus, Prisma } from "@prisma/client";
+import { RepositoryStatus } from "@prisma/client";
 import { IndexingService } from "../indexing/indexing.service";
 import { CreateRepositoryDto } from "./dtos/create-repository.dto";
 import { IndexRepositoryDto } from "./dtos/index-repository.dto";
@@ -22,7 +22,7 @@ export class RepositoriesService {
     return match?.[1] ?? "";
   }
 
-  async create(projectId: string, { url, branch, type, metadata }: CreateRepositoryDto) {
+  async create(projectId: string, { url, branch, type }: CreateRepositoryDto) {
     return this.prisma.repository.create({
       data: {
         projectId,
@@ -31,7 +31,6 @@ export class RepositoriesService {
         branch,
         type,
         status: RepositoryStatus.pending,
-        metadata: metadata ?? Prisma.JsonNull,
       },
     });
   }
@@ -81,7 +80,6 @@ export class RepositoriesService {
       status?: RepositoryStatus;
       lastCommitHash?: string;
       error?: string;
-      metadata?: Prisma.InputJsonValue;
     },
   ) {
     await this.findOne(repositoryId); // check if repository exists

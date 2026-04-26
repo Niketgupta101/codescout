@@ -41,11 +41,6 @@ export class DocumentsController {
     return this.documentsService.findOne(projectId, documentId);
   }
 
-  @Get(":documentId/stats")
-  async getDocumentStats(@Param("projectId") projectId: string, @Param("documentId") documentId: string) {
-    return this.documentsService.getStats(projectId, documentId);
-  }
-
   @Delete(":documentId")
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteDocument(@Param("projectId") projectId: string, @Param("documentId") documentId: string) {

@@ -1,4 +1,5 @@
 import type { LLMMessage } from "../../llm/types/llm-message.type";
+import type { LLMResponseFormat } from "../../llm/types/llm-response-format.type";
 import type { LLMTool } from "../../llm/types/llm-tool.type";
 
 export type AnthropicChatCompletionOptions = {
@@ -8,4 +9,5 @@ export type AnthropicChatCompletionOptions = {
   systemPrompt?: string;
   temperature?: number;
   maxTokens?: number;
+  responseFormat?: LLMResponseFormat;
 };

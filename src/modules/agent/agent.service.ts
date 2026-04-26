@@ -281,7 +281,6 @@ Available tools:
 - search_symbols: Find functions, classes, types by name
 - search_code: Search for code patterns using regex
 - get_file_tree: Get project folder structure
-- get_stats: Get project statistics
 - get_directory: List files in a directory`;
 
     const conversationTools = hasConversationContext
@@ -551,9 +550,6 @@ Answer the question based on these findings:`,
       case "get_file_tree":
         return this.tools.getFileTree(projectId);
 
-      case "get_stats":
-        return this.tools.getStats(projectId);
-
       case "get_directory":
         return this.tools.getDirectory(projectId, args.path as string);
 
@@ -648,12 +644,6 @@ Answer the question based on these findings:`,
         name: "get_file_tree",
         description:
           "Get the hierarchical folder/file structure of the project. Useful for understanding project organization.",
-        parameters: {},
-      },
-      {
-        name: "get_stats",
-        description:
-          "Get project statistics including total files, files by language, total symbols, and symbols by type. Useful for understanding project scope.",
         parameters: {},
       },
       {

@@ -178,7 +178,6 @@ model Repository {
   lastCommitHash String?
   status         RepositoryStatus @default(pending)
   type           RepositoryType   @default(custom)
-  metadata       Json?
   error          String?          @db.Text
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt

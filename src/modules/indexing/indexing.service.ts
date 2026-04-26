@@ -366,10 +366,6 @@ export class IndexingService {
       await this.repositoriesService.update(repository.id, {
         status: "completed",
         lastCommitHash: commitHash,
-        metadata: {
-          fileCount: files.length,
-          symbolCount: totalSymbols,
-        },
       });
 
       const duration = this._formatDuration(Date.now() - startTime);

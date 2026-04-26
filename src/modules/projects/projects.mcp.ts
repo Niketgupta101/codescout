@@ -7,7 +7,6 @@ import { ProjectCreateInput, ProjectCreateSchema } from "./dto/project-create.sc
 import { ProjectFileTreeGetInput, ProjectFileTreeGetSchema } from "./dto/project-file-tree-get.schema";
 import { ProjectGetInput, ProjectGetSchema } from "./dto/project-get.schema";
 import { ProjectListInput, ProjectListSchema } from "./dto/project-list.schema";
-import { ProjectStatsGetInput, ProjectStatsGetSchema } from "./dto/project-stats-get.schema";
 import { ProjectService } from "./projects.service";
 
 @Injectable()
@@ -66,28 +65,6 @@ export class ProjectsMcp {
       name: projectCreateInput.name,
       description: projectCreateInput.description,
     });
-  }
-
-  @Tool({
-    name: "projectStatsGet",
-    description:
-      "Get indexing statistics for a project: total files, files by language, total symbols, symbols by type. " +
-      "Use this for a quick 'how big is this codebase' answer without burning tool budget on file reads.",
-    parameters: ProjectStatsGetSchema,
-  })
-  async projectStatsGet(
-    projectStatsGetInput: ProjectStatsGetInput,
-    _context: Context,
-    request?: McpToolRequest,
-  ) {
-    const actor = await this.mcpActorService.actorResolve(request);
-    const project = await this.mcpActorService.projectFindOneForAccessCheck({
-      projectId: projectStatsGetInput.projectId,
-      gitRemoteUrl: projectStatsGetInput.gitRemoteUrl,
-      actor,
-    });
-
-    return this.agentToolsService.getStats(project.id);
   }
 
   @Tool({
