@@ -26,6 +26,7 @@ import { EnvModule } from "./modules/env/env.module";
 import { ThrottlerModule } from "@nestjs/throttler";
 import { EnvService } from "./modules/env/env.service";
 import { AppLogger } from "./providers/app-logger.service";
+import { HealthModule } from "./modules/health/health.module";
 import { MeModule } from "./modules/me/me.module";
 import { UserModule } from "./modules/user/user.module";
 import { UserApiKeyModule } from "./modules/user-api-key/user-api-key.module";
@@ -61,6 +62,7 @@ import { RequestWithUser } from "./modules/auth/types/request-with-user.type";
     }),
     PrismaModule,
     AuthModule,
+    HealthModule,
     MeModule,
     UserModule,
     UserApiKeyModule,
