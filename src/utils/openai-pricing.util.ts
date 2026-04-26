@@ -17,6 +17,19 @@ export const EXPECTED_SUMMARY_OUTPUT_TOKENS = 500;
 // the embedding step embeds the summary, which has the same token count as the summary output
 export const EXPECTED_EMBEDDING_INPUT_TOKENS = EXPECTED_SUMMARY_OUTPUT_TOKENS;
 
+// directory-summary input includes file summaries + child directory summaries + ~150 token prompt overhead
+// rough average across directories — actual depends on how many files/children each directory has
+export const EXPECTED_DIRECTORY_SUMMARY_INPUT_TOKENS = 2500;
+
+// directory-summary prompt asks for "under 150 words" — typical output is ~300–400 tokens
+export const EXPECTED_DIRECTORY_SUMMARY_OUTPUT_TOKENS = 400;
+
+// project-summary input is the top-level directory summaries — usually 5–15 of them at ~400 tokens each + prompt overhead
+export const EXPECTED_PROJECT_SUMMARY_INPUT_TOKENS = 5000;
+
+// project-summary prompt asks for "under 250 words" — typical output is ~500–600 tokens
+export const EXPECTED_PROJECT_SUMMARY_OUTPUT_TOKENS = 600;
+
 // guard against pathologically large files (lockfiles, generated bundles, etc.)
 // files exceeding this token count are skipped during indexing, not truncated
 export const MAX_INPUT_TOKENS_PER_FILE = 100_000;

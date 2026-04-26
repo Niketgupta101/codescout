@@ -8,6 +8,7 @@ import { RepositoryIndexCostEstimateTokensEntity } from "./repository-index-cost
 @Expose()
 export class RepositoryIndexCostEstimateEntity {
   totalFiles: number;
+  totalDirectories: number;
 
   @Type(() => RepositoryIndexCostEstimateLanguageCountEntity)
   filesByLanguage: RepositoryIndexCostEstimateLanguageCountEntity[];

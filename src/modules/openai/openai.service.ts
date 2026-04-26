@@ -1,8 +1,11 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import OpenAI from "openai";
-import { GenerateSummaryOptions } from "./types/generate-file-summary-options.type";
 import { GenerateEmbeddingOptions } from "./types/generate-embedding-options.type";
+import { GenerateSummaryOptions } from "./types/generate-file-summary-options.type";
+import { OpenAiGenerateDirectorySummaryOptions } from "./types/openai-generate-directory-summary-options.type";
+import { OpenAiGenerateProjectSummaryOptions } from "./types/openai-generate-project-summary-options.type";
+import { OpenAiTokenUsage } from "./types/openai-token-usage.type";
 import type { OpenAIChatCompletionOptions } from "./types/openai-chat-completion-options.type";
 import type { LLMMessage } from "../llm/types/llm-message.type";
 import type { LLMTool } from "../llm/types/llm-tool.type";
@@ -24,13 +27,22 @@ export class OpenAIService {
     this.openai = new OpenAI({ apiKey });
   }
 
-  async generateEmbedding({ input, model = "text-embedding-3-large" }: GenerateEmbeddingOptions): Promise<number[]> {
+  async generateEmbedding({
+    input,
+    model = "text-embedding-3-large",
+  }: GenerateEmbeddingOptions): Promise<{ embedding: number[]; usage: OpenAiTokenUsage }> {
     const response = await this.openai.embeddings.create({
       input,
       model,
     });
 
-    return response.data[0].embedding;
+    return {
+      embedding: response.data[0].embedding,
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: 0,
+      },
+    };
   }
 
   async chatCompletion(options: OpenAIChatCompletionOptions): Promise<LLMChatResponse> {
@@ -144,7 +156,7 @@ export class OpenAIService {
     language,
     filePath,
     model = "gpt-4o-mini",
-  }: GenerateSummaryOptions): Promise<string> {
+  }: GenerateSummaryOptions): Promise<{ summary: string; usage: OpenAiTokenUsage }> {
     const prompt = this._buildSummaryPrompt(language, filePath, content);
 
     const response = await this.openai.chat.completions.create({
@@ -164,11 +176,148 @@ export class OpenAIService {
     });
 
     const summary = response.choices[0]?.message?.content;
+
     if (!summary) {
       throw new Error("No summary generated from OpenAI");
     }
 
-    return summary;
+    return {
+      summary,
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+      },
+    };
+  }
+
+  async generateDirectorySummary({
+    projectName,
+    directoryFullPath,
+    fileSummaries,
+    childDirectorySummaries,
+    model = "gpt-4o-mini",
+  }: OpenAiGenerateDirectorySummaryOptions): Promise<{ summary: string; usage: OpenAiTokenUsage }> {
+    const prompt = this._buildDirectorySummaryPrompt({
+      projectName,
+      directoryFullPath,
+      fileSummaries,
+      childDirectorySummaries,
+    });
+
+    const response = await this.openai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 1024,
+    });
+
+    const summary = response.choices[0]?.message?.content;
+
+    if (!summary) {
+      throw new Error("No directory summary generated from OpenAI");
+    }
+
+    return {
+      summary,
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+      },
+    };
+  }
+
+  async generateProjectSummary({
+    projectName,
+    topLevelDirectorySummaries,
+    model = "gpt-4o-mini",
+  }: OpenAiGenerateProjectSummaryOptions): Promise<{ summary: string; usage: OpenAiTokenUsage }> {
+    const prompt = this._buildProjectSummaryPrompt({ projectName, topLevelDirectorySummaries });
+
+    const response = await this.openai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 1024,
+    });
+
+    const summary = response.choices[0]?.message?.content;
+
+    if (!summary) {
+      throw new Error("No project summary generated from OpenAI");
+    }
+
+    return {
+      summary,
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+      },
+    };
+  }
+
+  _buildDirectorySummaryPrompt({
+    projectName,
+    directoryFullPath,
+    fileSummaries,
+    childDirectorySummaries,
+  }: Omit<OpenAiGenerateDirectorySummaryOptions, "model">): string {
+    const filesSection =
+      fileSummaries.length > 0
+        ? `Files directly in this directory:\n${fileSummaries
+            .map((file) => `- ${this._lastPathSegment(file.fullPath)}: ${file.summary}`)
+            .join("\n\n")}\n\n`
+        : "";
+
+    const childDirectoriesSection =
+      childDirectorySummaries.length > 0
+        ? `Subdirectories:\n${childDirectorySummaries
+            .map((directory) => `- ${this._lastPathSegment(directory.fullPath)}/: ${directory.summary}`)
+            .join("\n\n")}\n\n`
+        : "";
+
+    return `Summarize this directory in the ${projectName} codebase.
+
+Path: ${directoryFullPath}/
+
+${filesSection}${childDirectoriesSection}Write 2-3 sentences covering:
+1. What this directory is responsible for
+2. How its files and subdirectories work together
+
+Keep it under 150 words.`;
+  }
+
+  _buildProjectSummaryPrompt({
+    projectName,
+    topLevelDirectorySummaries,
+  }: Omit<OpenAiGenerateProjectSummaryOptions, "model">): string {
+    const directoriesSection = topLevelDirectorySummaries
+      .map((directory) => `- ${directory.fullPath}/: ${directory.summary}`)
+      .join("\n\n");
+
+    return `Summarize this codebase.
+
+Project name: ${projectName}
+
+Top-level directories:
+${directoriesSection}
+
+Write 3-4 sentences covering:
+1. What the project is and what it does
+2. Key technologies and domain
+3. Overall architecture shape
+
+Keep it under 250 words.`;
+  }
+
+  _lastPathSegment(fullPath: string): string {
+    const segments = fullPath.split("/");
+    return segments[segments.length - 1] ?? fullPath;
   }
 
   _buildSummaryPrompt(language: string, filePath: string, content: string): string {

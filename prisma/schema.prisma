@@ -48,6 +48,7 @@ model Project {
   id            String         @id @default(uuid()) @db.Uuid
   name          String         @unique
   description   String?
+  summary       String?        @db.Text
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   codeFiles     CodeFile[]
@@ -55,6 +56,30 @@ model Project {
   repositories  Repository[]
   documents     Document[]
   conversations Conversation[]
+  directories   Directory[]
+}
+
+model Directory {
+  id        String      @id @default(uuid()) @db.Uuid
+  projectId String      @db.Uuid
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  parentId  String?     @db.Uuid
+  parent    Directory?  @relation("DirectoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Directory[] @relation("DirectoryHierarchy")
+
+  codeFiles CodeFile[]
+
+  fullPath  String
+  depth     Int
+  summary   String?     @db.Text
+
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([projectId, fullPath])
+  @@index([projectId, parentId])
+  @@index([projectId, depth])
 }
 
 enum CodeFileLanguage {
@@ -77,6 +102,8 @@ model CodeFile {
   repository       Repository?                  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   documentId       String?                      @db.Uuid
   document         Document?                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  directoryId      String?                      @db.Uuid
+  directory        Directory?                   @relation(fields: [directoryId], references: [id], onDelete: SetNull)
   fullPath         String
   language         CodeFileLanguage
   rawContent       String                       @db.Text
@@ -92,6 +119,7 @@ model CodeFile {
   @@index([projectId, language])
   @@index([repositoryId])
   @@index([documentId])
+  @@index([directoryId])
   @@index([checksum])
 }
 

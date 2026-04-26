@@ -6,6 +6,7 @@ export class ProjectEntity implements Project {
   id: string;
   name: string;
   description: string | null;
+  summary: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

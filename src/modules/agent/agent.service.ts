@@ -3,12 +3,15 @@ import { AgentToolsService } from "./agent-tools.service";
 import { ConversationsService } from "../conversations/conversations.service";
 import { CodeFileLanguage, SymbolType } from "@prisma/client";
 import { LLMService } from "../llm/llm.service";
+import { PrismaService } from "../../prisma/prisma.service";
 import type { LLMProvider } from "../llm/types/llm-provider.type";
 import type { LLMMessage } from "../llm/types/llm-message.type";
 import type { LLMTool } from "../llm/types/llm-tool.type";
 import { AgentQuery } from "./types/agent-query.type";
 import { AgentResponse } from "./types/agent-response.type";
 import { AgentLLMAnswerToQuery } from "./types/agent-llm-answer-to-query.type";
+import { AgentFormatProjectContextOptions } from "./types/agent-format-project-context-options.type";
+import { formatProjectContextSection } from "./utils/format-project-context.util";
 
 @Injectable()
 export class AgentService {
@@ -17,6 +20,7 @@ export class AgentService {
   constructor(
     readonly tools: AgentToolsService,
     readonly llmService: LLMService,
+    readonly prisma: PrismaService,
     @Inject(forwardRef(() => ConversationsService))
     readonly conversationsService: ConversationsService,
   ) {}
@@ -37,69 +41,11 @@ export class AgentService {
     this.logger.log(`Agent query: "${request.query}" (${provider}/${model})`);
 
     const toolCalls: AgentResponse["toolCalls"] = [];
+    const systemPrompt = await this._buildSystemPrompt(projectId, false);
     const messages: LLMMessage[] = [
       {
         role: "system",
-        content: `You are a helpful coding assistant that helps users understand codebases and documents. You have access to tools to explore the project.
-
-Project ID: ${projectId}
-
-Available tools:
-- search_files: Semantic search for relevant files (BEST for discovering what to read)
-- list_files: List all files (optional pattern filter)
-- read_file: Read full content of a file
-- search_symbols: Find functions, classes, types by name
-- search_code: Search for code patterns using regex
-- get_file_tree: Get project folder structure
-- get_stats: Get project statistics
-- get_directory: List files in a directory
-
-**YOUR JOB: Gather accurate information from the codebase**
-
-You are a research assistant. Your job is to:
-1. Find relevant files using search tools
-2. Read the actual file content
-3. Extract key information and relevant code excerpts
-4. Provide factual findings based on what you read
-
-**EXPLORATION STRATEGY:**
-
-For feature/implementation questions ("explain X", "how does Y work"):
-1. FIRST: Use search_files to discover relevant files
-   - Use expanded natural language queries with synonyms (e.g., "user registration signup create account" not just "register")
-   - Search with documentTypes=['technicalSpecification', 'userStories', 'meetingNotes', 'custom'] for documentation
-   - Then search with documentTypes=['backendCodebase', 'webCodebase', 'appCodebase', 'custom'] for code
-   - **CRITICAL: If search returns 0 results, try 2-3 alternative queries with different synonyms before giving up**
-     Example: "register" → "user signup" → "user creation" → "account creation"
-2. SECOND: **ALWAYS read actual file content** - summaries are ONLY for discovery
-   - Look at the file paths and summaries from search results
-   - Choose which files to read based on relevance (file names, similarity scores)
-   - **IMPORTANT: Follow the logic chain to find actual implementation**
-     - If a file just calls methods from other files, read those files too
-     - Example: if you read a file that calls authService.login(), also read the file containing that method
-     - Your goal: show the actual business logic that answers the user's question
-     - You CAN read files not in search results if they contain the actual implementation
-   - **Don't read unrelated/random files** - only follow the logic chain to complete the answer
-   - **NEVER answer from summaries alone - read the actual files**
-3. THIRD: Answer based ONLY on files you actually read
-   - If you cannot find relevant files after trying multiple search queries, respond: "I cannot find [feature] in this codebase"
-   - **NEVER make assumptions or generate code that doesn't exist**
-   - Cite specific file paths and line numbers in your answer
-
-For "what is this project about" questions:
-- Use search_files without documentTypes filter to find all relevant files
-- **ALWAYS read the actual files** - do not rely on summaries alone
-- Prioritize reading documentation (PDFs, READMEs, spec docs, CSVs)
-- Provide high-level overview from actual content you read
-
-**CRITICAL GROUNDING RULES:**
-- ONLY provide information from files you actually read with read_file tool
-- If information is not in the files you read, say "I don't have information about [X]"
-- NEVER infer, assume, or generate code/details that aren't explicitly in the file content
-- Always cite specific file paths when providing information
-- Provide relevant code excerpts when you find them
-
-The user wants accurate information from their codebase, not generic knowledge.`,
+        content: systemPrompt,
       },
       {
         role: "user",
@@ -217,10 +163,11 @@ The user wants accurate information from their codebase, not generic knowledge.`
     );
 
     const toolCalls: AgentResponse["toolCalls"] = [];
+    const systemPrompt = await this._buildSystemPrompt(projectId, !!conversationId);
     const messages: LLMMessage[] = [
       {
         role: "system",
-        content: this._buildSystemPrompt(projectId, !!conversationId),
+        content: systemPrompt,
       },
       ...conversationContext, // previous conversation messages
       {
@@ -319,11 +266,11 @@ The user wants accurate information from their codebase, not generic knowledge.`
     throw new Error(`Max iterations (${maxIterations}) reached`);
   }
 
-  /**
-   * Build system prompt
-   */
-  _buildSystemPrompt(projectId: string, hasConversationContext: boolean): string {
-    const basePrompt = `You are a helpful coding assistant that helps users understand codebases and documents. You have access to tools to explore the project.
+  async _buildSystemPrompt(projectId: string, hasConversationContext: boolean): Promise<string> {
+    const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
+    const projectContextSection = formatProjectContextSection(projectContext);
+
+    const basePrompt = `${projectContextSection}You are a helpful coding assistant that helps users understand codebases and documents. You have access to tools to explore the project.
 
 Project ID: ${projectId}
 
@@ -385,6 +332,33 @@ For "what is this project about" questions:
 
 The user wants accurate information from their codebase, not generic knowledge.`
     );
+  }
+
+  async _fetchProjectContextForSystemPrompt(projectId: string): Promise<AgentFormatProjectContextOptions> {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { name: true, summary: true },
+    });
+
+    // project deleted or never existed — return an empty shape so the formatter renders nothing instead of throwing
+    if (!project) {
+      return { projectName: "", projectSummary: null, directories: [] };
+    }
+
+    // depth cap is enforced at query time so the formatter doesn't have to filter — keeps the prompt size bounded
+    // ordering by depth then path makes the formatted tree natural to read top-down
+    const directories = await this.prisma.directory.findMany({
+      where: { projectId, depth: { lte: 3 } },
+      orderBy: [{ depth: "asc" }, { fullPath: "asc" }],
+      take: 50,
+      select: { fullPath: true, depth: true, summary: true },
+    });
+
+    return {
+      projectName: project.name,
+      projectSummary: project.summary,
+      directories,
+    };
   }
 
   /**

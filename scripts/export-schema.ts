@@ -28,13 +28,22 @@ void (async () => {
   });
 
   const config = new DocumentBuilder()
-    .setTitle("MP Logistics API")
-    .setDescription("MP Logistics API endpoints")
+    .setTitle("Code Chat API")
+    .setDescription("Code Chat REST API — projects, indexing, repositories, documents, conversations, messages")
     .setVersion("1.0")
-    .addCookieAuth("accessToken")
+    .addServer("http://localhost:4000", "Local dev")
+    .addBearerAuth(
+      { type: "http", scheme: "bearer", bearerFormat: "JWT", in: "header" },
+      "bearer",
+    )
+    .addSecurityRequirements("bearer")
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
 
-  await writeFile(output, JSON.stringify(document), "utf-8");
+  await writeFile(output, JSON.stringify(document, null, 2), "utf-8");
+
+  console.log(`OpenAPI spec written to ${output}`);
+
+  await app.close();
 })();

@@ -379,7 +379,7 @@ export class AgentToolsService {
       this.logger.debug(`searchFiles(query=${query}, types=${(documentTypes ?? []).join(",")}, topK=${topK})`);
 
       // generate embedding for query
-      const queryEmbedding = await this.openaiService.generateEmbedding({ input: query });
+      const { embedding: queryEmbedding } = await this.openaiService.generateEmbedding({ input: query });
       const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
       // build SQL query with vector search

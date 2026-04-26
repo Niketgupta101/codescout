@@ -102,7 +102,7 @@ export class ChatService {
     );
 
     // 4. Generate embedding for assistant message
-    const embedding = await this.openaiService.generateEmbedding({ input: response.answer });
+    const { embedding } = await this.openaiService.generateEmbedding({ input: response.answer });
 
     // 5. Store assistant response
     const assistantMessage = await this.conversationsService.addMessage(

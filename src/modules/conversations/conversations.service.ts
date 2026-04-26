@@ -239,7 +239,7 @@ export class ConversationsService {
   async searchHistory(conversationId: string, query: string, topK = 3): Promise<Message[]> {
     try {
       // generate query embedding
-      const queryEmbedding = await this.openaiService.generateEmbedding({ input: query });
+      const { embedding: queryEmbedding } = await this.openaiService.generateEmbedding({ input: query });
       const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
       // vector search on message embeddings

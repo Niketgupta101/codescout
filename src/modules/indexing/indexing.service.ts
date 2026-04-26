@@ -11,7 +11,15 @@ import type { ParsedDocument } from "../parsers/types/parsed-document.type";
 import { DocumentIndexingOptions } from "./types/document-indexing-options.type";
 import { IndexingResult } from "./types/indexing-result.type";
 import { RepositoryIndexingOptions } from "./types/repository-indexing-options.type";
+import { IndexingDirectoryTreeNode } from "./types/indexing-directory-tree-node.type";
+import { IndexingTokenAccumulator } from "./types/indexing-token-accumulator.type";
+import {
+  buildDirectoryTreeFromCodeFilePaths,
+  findContainingDirectoryFullPath,
+} from "./utils/build-directory-tree.util";
+import { buildEmptyIndexingTokenAccumulator, logIndexingCostBreakdown } from "./utils/indexing-cost.util";
 import { buildRepositoryIndexFileFilter } from "./utils/repository-file-filter.util";
+import { OpenAiFileOrDirectoryPathSummary } from "../openai/types/openai-file-or-directory-path-summary.type";
 
 const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   function: SymbolType.function,
@@ -41,6 +49,7 @@ export class IndexingService {
     this.logger.log(`Starting document indexing for project ${projectId}`);
 
     const errors: string[] = [];
+    const tokenAccumulator = buildEmptyIndexingTokenAccumulator();
     let totalFiles = 0;
     let totalSymbols = 0;
 
@@ -93,14 +102,21 @@ export class IndexingService {
           const checksum = calculateChecksum(rawContent);
 
           this.logger.log(`Generating summary for ${logicalPath}...`);
-          const summary = await this.openaiService.generateFileSummary({
+          const { summary, usage: summaryUsage } = await this.openaiService.generateFileSummary({
             content: rawContent,
             language,
             filePath: logicalPath,
           });
 
+          tokenAccumulator.fileSummaryInputTokens += summaryUsage.inputTokens;
+          tokenAccumulator.fileSummaryOutputTokens += summaryUsage.outputTokens;
+          tokenAccumulator.fileSummaryCallCount += 1;
+
           this.logger.log(`Generating embedding for ${logicalPath}...`);
-          const embedding = await this.openaiService.generateEmbedding({ input: summary });
+          const { embedding, usage: embeddingUsage } = await this.openaiService.generateEmbedding({ input: summary });
+
+          tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
+          tokenAccumulator.fileEmbeddingCallCount += 1;
 
           const codeFile = await this.prisma.codeFile.create({
             data: {
@@ -134,9 +150,18 @@ export class IndexingService {
         }
       }
 
+      // generate hierarchical summaries before reporting "complete" so callers can rely on Project.summary being populated when indexing returns
+      await this._hierarchicalSummariesGenerate(projectId, tokenAccumulator);
+
       const duration = this._formatDuration(Date.now() - startTime);
 
       this.logger.log(`Document indexing complete: ${totalFiles} files, ${totalSymbols} symbols (${duration})`);
+
+      logIndexingCostBreakdown({
+        logger: this.logger,
+        context: `documents in project ${projectId}`,
+        accumulator: tokenAccumulator,
+      });
 
       return {
         projectId,
@@ -160,6 +185,7 @@ export class IndexingService {
     this.logger.log(`Starting repository indexing for ${url}`);
 
     const errors: string[] = [];
+    const tokenAccumulator = buildEmptyIndexingTokenAccumulator();
     let totalFiles = 0;
     let totalSymbols = 0;
     let repository;
@@ -280,14 +306,21 @@ export class IndexingService {
 
           // generate summary and embedding
           this.logger.log(`Generating summary for ${file.path}...`);
-          const summary = await this.openaiService.generateFileSummary({
+          const { summary, usage: summaryUsage } = await this.openaiService.generateFileSummary({
             content: file.content,
             language: file.language,
             filePath: fullPath,
           });
 
+          tokenAccumulator.fileSummaryInputTokens += summaryUsage.inputTokens;
+          tokenAccumulator.fileSummaryOutputTokens += summaryUsage.outputTokens;
+          tokenAccumulator.fileSummaryCallCount += 1;
+
           this.logger.log(`Generating embedding for ${file.path}...`);
-          const embedding = await this.openaiService.generateEmbedding({ input: summary });
+          const { embedding, usage: embeddingUsage } = await this.openaiService.generateEmbedding({ input: summary });
+
+          tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
+          tokenAccumulator.fileEmbeddingCallCount += 1;
 
           // create CodeFile record
           const codeFile = await this.prisma.codeFile.create({
@@ -326,6 +359,9 @@ export class IndexingService {
       // delete orphaned files
       const deletedCount = await this._deleteOrphanedFiles(projectId, repository.id, currentFilePaths);
 
+      // generate hierarchical summaries before flipping status to completed so search/chat can rely on summaries being populated when status flips
+      await this._hierarchicalSummariesGenerate(projectId, tokenAccumulator);
+
       // update status: completed
       await this.repositoriesService.update(repository.id, {
         status: "completed",
@@ -342,6 +378,12 @@ export class IndexingService {
       this.logger.log(
         `Summary: ${newCount} new, ${reindexedCount} updated, ${skippedCount} unchanged, ${deletedCount} deleted`,
       );
+
+      logIndexingCostBreakdown({
+        logger: this.logger,
+        context: `repository ${url}`,
+        accumulator: tokenAccumulator,
+      });
 
       return {
         projectId,
@@ -561,9 +603,229 @@ export class IndexingService {
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
 
+    // sub-minute durations don't need the leading "0m" — keep them compact
     if (minutes > 0) {
       return `${minutes}m ${seconds % 60}s`;
     }
+
     return `${seconds}s`;
+  }
+
+  async _hierarchicalSummariesGenerate(projectId: string, tokenAccumulator: IndexingTokenAccumulator): Promise<void> {
+    const project = await this.prisma.project.findUniqueOrThrow({
+      where: { id: projectId },
+      select: { id: true, name: true },
+    });
+
+    const codeFiles = await this.prisma.codeFile.findMany({
+      where: { projectId },
+      select: { id: true, fullPath: true, summary: true },
+    });
+
+    // nothing to summarize on an empty project — leave Project.summary and Directory rows untouched
+    if (codeFiles.length === 0) {
+      this.logger.log(`Skipping hierarchical summaries for empty project ${projectId}`);
+      return;
+    }
+
+    this.logger.log(`Generating hierarchical summaries for project ${project.name} (${codeFiles.length} files)`);
+
+    const treeNodes = buildDirectoryTreeFromCodeFilePaths(codeFiles.map((codeFile) => codeFile.fullPath));
+
+    const fullPathToDirectoryId = await this._directoriesUpsertFromTree(projectId, treeNodes);
+
+    await this._codeFilesLinkToDirectories(codeFiles, fullPathToDirectoryId);
+
+    const directorySummariesByFullPath = await this._directorySummariesGenerateBottomUp({
+      projectName: project.name,
+      projectId,
+      treeNodes,
+      codeFiles,
+      tokenAccumulator,
+    });
+
+    await this._projectSummaryGenerate({
+      projectId,
+      projectName: project.name,
+      treeNodes,
+      tokenAccumulator,
+      directorySummariesByFullPath,
+    });
+
+    this.logger.log(`Hierarchical summaries complete for project ${project.name}`);
+  }
+
+  async _directoriesUpsertFromTree(
+    projectId: string,
+    treeNodes: IndexingDirectoryTreeNode[],
+  ): Promise<Map<string, string>> {
+    const fullPathToDirectoryId = new Map<string, string>();
+
+    // tree is sorted depth ascending so each directory's parent is always upserted first
+    // this keeps the parentId FK satisfied without deferring constraints
+    for (const node of treeNodes) {
+      // root-level directories have no parent in our hierarchy
+      // deeper ones look up their parent's id from the map populated by previous iterations
+      const parentId = node.parentFullPath ? (fullPathToDirectoryId.get(node.parentFullPath) ?? null) : null;
+
+      const directory = await this.prisma.directory.upsert({
+        where: { projectId_fullPath: { projectId, fullPath: node.fullPath } },
+        create: {
+          projectId,
+          fullPath: node.fullPath,
+          depth: node.depth,
+          parentId,
+        },
+        update: {
+          parentId,
+          depth: node.depth,
+        },
+        select: { id: true },
+      });
+
+      fullPathToDirectoryId.set(node.fullPath, directory.id);
+    }
+
+    return fullPathToDirectoryId;
+  }
+
+  async _codeFilesLinkToDirectories(
+    codeFiles: { id: string; fullPath: string }[],
+    fullPathToDirectoryId: Map<string, string>,
+  ): Promise<void> {
+    for (const codeFile of codeFiles) {
+      const containingDirectoryFullPath = findContainingDirectoryFullPath(codeFile.fullPath);
+
+      // file at project root has no containing directory — leave directoryId null
+      // otherwise resolve to the upserted Directory row's id
+      const directoryId = containingDirectoryFullPath
+        ? (fullPathToDirectoryId.get(containingDirectoryFullPath) ?? null)
+        : null;
+
+      await this.prisma.codeFile.update({
+        where: { id: codeFile.id },
+        data: { directoryId },
+      });
+    }
+  }
+
+  async _directorySummariesGenerateBottomUp({
+    projectName,
+    projectId,
+    treeNodes,
+    codeFiles,
+    tokenAccumulator,
+  }: {
+    projectName: string;
+    projectId: string;
+    treeNodes: IndexingDirectoryTreeNode[];
+    codeFiles: { fullPath: string; summary: string | null }[];
+    tokenAccumulator: IndexingTokenAccumulator;
+  }): Promise<Map<string, string>> {
+    const directorySummariesByFullPath = new Map<string, string>();
+    const depthsDescending = [...new Set(treeNodes.map((node) => node.depth))].sort((a, b) => b - a);
+
+    // process leaves first so each non-leaf directory has its children's summaries available when summarized
+    for (const depth of depthsDescending) {
+      const directoriesAtDepth = treeNodes.filter((node) => node.depth === depth);
+
+      await Promise.all(
+        directoriesAtDepth.map(async (directoryNode) => {
+          const fileSummaries: OpenAiFileOrDirectoryPathSummary[] = codeFiles
+            .filter(
+              (codeFile) =>
+                findContainingDirectoryFullPath(codeFile.fullPath) === directoryNode.fullPath && codeFile.summary,
+            )
+            .map((codeFile) => ({ fullPath: codeFile.fullPath, summary: codeFile.summary! }));
+
+          const childDirectorySummaries: OpenAiFileOrDirectoryPathSummary[] = treeNodes
+            .filter((node) => node.parentFullPath === directoryNode.fullPath)
+            .map((childNode) => ({
+              fullPath: childNode.fullPath,
+              summary: directorySummariesByFullPath.get(childNode.fullPath) ?? "",
+            }))
+            .filter((childSummary) => childSummary.summary.length > 0);
+
+          // a directory with neither summarized files nor summarized children has no useful content to feed the LLM
+          if (fileSummaries.length === 0 && childDirectorySummaries.length === 0) {
+            return;
+          }
+
+          try {
+            const { summary, usage } = await this.openaiService.generateDirectorySummary({
+              projectName,
+              directoryFullPath: directoryNode.fullPath,
+              fileSummaries,
+              childDirectorySummaries,
+            });
+
+            tokenAccumulator.directorySummaryInputTokens += usage.inputTokens;
+            tokenAccumulator.directorySummaryOutputTokens += usage.outputTokens;
+            tokenAccumulator.directorySummaryCallCount += 1;
+
+            directorySummariesByFullPath.set(directoryNode.fullPath, summary);
+
+            await this.prisma.directory.update({
+              where: { projectId_fullPath: { projectId, fullPath: directoryNode.fullPath } },
+              data: { summary },
+            });
+          } catch (error) {
+            // one failed directory shouldn't take down the whole pass — log and move on so other directories still get summarized
+            this.logger.error(`Failed to generate summary for directory ${directoryNode.fullPath}`, error);
+          }
+        }),
+      );
+    }
+
+    return directorySummariesByFullPath;
+  }
+
+  async _projectSummaryGenerate({
+    projectId,
+    projectName,
+    treeNodes,
+    directorySummariesByFullPath,
+    tokenAccumulator,
+  }: {
+    projectId: string;
+    projectName: string;
+    treeNodes: IndexingDirectoryTreeNode[];
+    directorySummariesByFullPath: Map<string, string>;
+    tokenAccumulator: IndexingTokenAccumulator;
+  }): Promise<void> {
+    const topLevelDirectorySummaries: OpenAiFileOrDirectoryPathSummary[] = treeNodes
+      .filter((node) => node.depth === 1)
+      .map((node) => ({
+        fullPath: node.fullPath,
+        summary: directorySummariesByFullPath.get(node.fullPath) ?? "",
+      }))
+      .filter((entry) => entry.summary.length > 0);
+
+    // no top-level summaries means all directory generations failed or the project is structurally empty
+    // skip the project-level call rather than feeding the LLM nothing
+    if (topLevelDirectorySummaries.length === 0) {
+      this.logger.warn(
+        `No top-level directory summaries available for project ${projectId} — skipping project summary`,
+      );
+      return;
+    }
+
+    try {
+      const { summary: projectSummary, usage } = await this.openaiService.generateProjectSummary({
+        projectName,
+        topLevelDirectorySummaries,
+      });
+
+      tokenAccumulator.projectSummaryInputTokens += usage.inputTokens;
+      tokenAccumulator.projectSummaryOutputTokens += usage.outputTokens;
+      tokenAccumulator.projectSummaryCallCount += 1;
+
+      await this.prisma.project.update({
+        where: { id: projectId },
+        data: { summary: projectSummary },
+      });
+    } catch (error) {
+      this.logger.error(`Failed to generate project summary for ${projectId}`, error);
+    }
   }
 }

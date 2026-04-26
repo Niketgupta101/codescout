@@ -1,5 +1,6 @@
 export type RepositoryIndexCostEstimate = {
   totalFiles: number;
+  totalDirectories: number;
   filesByLanguage: { language: string; count: number }[];
   filesSkipped: { path: string; reason: string }[];
 
@@ -7,12 +8,18 @@ export type RepositoryIndexCostEstimate = {
     summaryInputExact: number;
     summaryOutputEstimated: number;
     embeddingInputEstimated: number;
+    directorySummaryInputEstimated: number;
+    directorySummaryOutputEstimated: number;
+    projectSummaryInputEstimated: number;
+    projectSummaryOutputEstimated: number;
   };
 
   cost: {
     summaryInput: number;
     summaryOutputEstimated: number;
     embeddingEstimated: number;
+    directorySummaryEstimated: number;
+    projectSummaryEstimated: number;
     total: number;
   };
 
