@@ -2,6 +2,7 @@ import { AgentFormatProjectContextOptions } from "../types/agent-format-project-
 
 const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_DIRECTORY_ENTRIES = 50;
+const MAX_PROJECT_SUMMARY_CHARS = 800;
 
 // renders the project + directory hierarchy as a system-prompt prefix so the agent starts oriented without tool calls
 // returns an empty string when nothing has been summarized yet (e.g. project indexed before this feature shipped)
@@ -17,14 +18,23 @@ export const formatProjectContextSection = ({
     return "";
   }
 
-  const sections: string[] = [`PROJECT: ${projectName}`];
+  const sections: string[] = ["<project_context>", `PROJECT: ${projectName}`];
 
   if (projectSummary) {
-    sections.push("", projectSummary);
+    // cap to keep prompt size bounded; long summaries crowd out the actual instructions
+    const truncatedSummary =
+      projectSummary.length > MAX_PROJECT_SUMMARY_CHARS
+        ? projectSummary.slice(0, MAX_PROJECT_SUMMARY_CHARS).trimEnd() + "…"
+        : projectSummary;
+
+    sections.push("", truncatedSummary);
   }
 
   const directoriesInBudget = directories
-    .filter((directory) => directory.depth <= maxDepth && directory.summary !== null)
+    .filter(
+      (directory): directory is typeof directory & { summary: string } =>
+        directory.depth <= maxDepth && directory.summary !== null,
+    )
     .slice(0, maxDirectoryEntries);
 
   if (directoriesInBudget.length > 0) {
@@ -39,7 +49,12 @@ export const formatProjectContextSection = ({
 
       sections.push(`${indent}- ${lastSegment}/: ${directory.summary}`);
     }
+
+    // hint helps the agent decide where to look first; only meaningful when STRUCTURE is non-empty
+    sections.push("", "Use STRUCTURE to pick where to look first; directories without summaries aren't indexed yet.");
   }
+
+  sections.push("</project_context>");
 
   // trailing blank line separates this block from the rest of the system prompt
   return sections.join("\n") + "\n\n";

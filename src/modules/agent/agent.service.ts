@@ -12,6 +12,8 @@ import { AgentResponse } from "./types/agent-response.type";
 import { AgentLLMAnswerToQuery } from "./types/agent-llm-answer-to-query.type";
 import { AgentFormatProjectContextOptions } from "./types/agent-format-project-context-options.type";
 import { formatProjectContextSection } from "./utils/format-project-context.util";
+import { buildAgentSystemPrompt } from "./utils/build-agent-system-prompt.util";
+import { buildAnswerGenerationPrompt } from "./utils/build-answer-generation-prompt.util";
 
 @Injectable()
 export class AgentService {
@@ -41,7 +43,16 @@ export class AgentService {
     this.logger.log(`Agent query: "${request.query}" (${provider}/${model})`);
 
     const toolCalls: AgentResponse["toolCalls"] = [];
-    const systemPrompt = await this._buildSystemPrompt(projectId, false);
+
+    // fetch once per request and reuse for both the research prompt and the answer prompt
+    const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
+
+    const systemPrompt = this._buildSystemPrompt({
+      projectId,
+      projectContext,
+      hasConversationContext: false,
+    });
+
     const messages: LLMMessage[] = [
       {
         role: "system",
@@ -125,8 +136,13 @@ export class AgentService {
         );
         this.logger.log(`Generating final answer from research findings...`);
 
-        // Generate concise answer from agent's research
-        const finalAnswer = await this._generateAnswer(request.query, response.content, provider, model);
+        const finalAnswer = await this._generateAnswer({
+          query: request.query,
+          agentFindings: response.content,
+          projectContext,
+          provider,
+          model,
+        });
 
         return {
           answer: finalAnswer,
@@ -163,7 +179,16 @@ export class AgentService {
     );
 
     const toolCalls: AgentResponse["toolCalls"] = [];
-    const systemPrompt = await this._buildSystemPrompt(projectId, !!conversationId);
+
+    // fetch once per request and reuse for both the research prompt and the answer prompt
+    const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
+
+    const systemPrompt = this._buildSystemPrompt({
+      projectId,
+      projectContext,
+      hasConversationContext: !!conversationId,
+    });
+
     const messages: LLMMessage[] = [
       {
         role: "system",
@@ -248,8 +273,13 @@ export class AgentService {
         );
         this.logger.log(`Generating final answer from research findings...`);
 
-        // Generate concise answer from agent's research
-        const finalAnswer = await this._generateAnswer(request.query, response.content, provider, model);
+        const finalAnswer = await this._generateAnswer({
+          query: request.query,
+          agentFindings: response.content,
+          projectContext,
+          provider,
+          model,
+        });
 
         return {
           answer: finalAnswer,
@@ -266,71 +296,20 @@ export class AgentService {
     throw new Error(`Max iterations (${maxIterations}) reached`);
   }
 
-  async _buildSystemPrompt(projectId: string, hasConversationContext: boolean): Promise<string> {
-    const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
-    const projectContextSection = formatProjectContextSection(projectContext);
-
-    const basePrompt = `${projectContextSection}You are a helpful coding assistant that helps users understand codebases and documents. You have access to tools to explore the project.
-
-Project ID: ${projectId}
-
-Available tools:
-- search_files: Semantic search for relevant files (BEST for discovering what to read)
-- list_files: List all files (optional pattern filter)
-- read_file: Read full content of a file
-- search_symbols: Find functions, classes, types by name
-- search_code: Search for code patterns using regex
-- get_file_tree: Get project folder structure
-- get_directory: List files in a directory`;
-
-    const conversationTools = hasConversationContext
-      ? "\n- search_conversation_history: Search previous messages in this conversation"
-      : "";
-
-    return (
-      basePrompt +
-      conversationTools +
-      `
-
-**EXPLORATION STRATEGY:**
-
-For feature/implementation questions ("explain X", "how does Y work"):
-1. FIRST: Use search_files to discover relevant files
-   - Use expanded natural language queries with synonyms (e.g., "user registration signup create account" not just "register")
-   - Search with documentTypes=['technicalSpecification', 'userStories', 'meetingNotes', 'custom'] for documentation
-   - Then search with documentTypes=['backendCodebase', 'webCodebase', 'appCodebase', 'custom'] for code
-   - **CRITICAL: If search returns 0 results, try 2-3 alternative queries with different synonyms before giving up**
-     Example: "register" → "user signup" → "user creation" → "account creation"
-2. SECOND: **ALWAYS read actual file content** - summaries are ONLY for discovery
-   - Look at the file paths and summaries from search results
-   - Choose which files to read based on relevance (file names, similarity scores)
-   - **IMPORTANT: Follow the logic chain to find actual implementation**
-     - If a file just calls methods from other files, read those files too
-     - Example: if you read a file that calls authService.login(), also read the file containing that method
-     - Your goal: show the actual business logic that answers the user's question
-     - You CAN read files not in search results if they contain the actual implementation
-   - **Don't read unrelated/random files** - only follow the logic chain to complete the answer
-   - **NEVER answer from summaries alone - read the actual files**
-3. THIRD: Answer based ONLY on files you actually read
-   - If you cannot find relevant files after trying multiple search queries, respond: "I cannot find [feature] in this codebase"
-   - **NEVER make assumptions or generate code that doesn't exist**
-   - Cite specific file paths and line numbers in your answer
-
-For "what is this project about" questions:
-- Use search_files without documentTypes filter to find all relevant files
-- **ALWAYS read the actual files** - do not rely on summaries alone
-- Prioritize reading documentation (PDFs, READMEs, spec docs, CSVs)
-- Provide high-level overview from actual content you read
-
-**CRITICAL GROUNDING RULES:**
-- ONLY provide information from files you actually read with read_file tool
-- If information is not in the files you read, say "I don't have information about [X]"
-- NEVER infer, assume, or generate code/details that aren't explicitly in the file content
-- Always cite specific file paths when providing information
-- Provide relevant code excerpts when you find them
-
-The user wants accurate information from their codebase, not generic knowledge.`
-    );
+  _buildSystemPrompt({
+    projectId,
+    projectContext,
+    hasConversationContext,
+  }: {
+    projectId: string;
+    projectContext: AgentFormatProjectContextOptions;
+    hasConversationContext: boolean;
+  }): string {
+    return buildAgentSystemPrompt({
+      projectId,
+      projectContextSection: formatProjectContextSection(projectContext),
+      hasConversationContext,
+    });
   }
 
   async _fetchProjectContextForSystemPrompt(projectId: string): Promise<AgentFormatProjectContextOptions> {
@@ -364,12 +343,24 @@ The user wants accurate information from their codebase, not generic knowledge.`
    * Generate final answer from agent's research findings.
    * Uses structured outputs to enforce response format.
    */
-  async _generateAnswer(
-    query: string,
-    agentFindings: string,
-    provider: LLMProvider,
-    model: string,
-  ): Promise<string> {
+  async _generateAnswer({
+    query,
+    agentFindings,
+    projectContext,
+    provider,
+    model,
+  }: {
+    query: string;
+    agentFindings: string;
+    projectContext: AgentFormatProjectContextOptions;
+    provider: LLMProvider;
+    model: string;
+  }): Promise<string> {
+    const systemPrompt = buildAnswerGenerationPrompt({
+      projectName: projectContext.projectName,
+      projectSummary: projectContext.projectSummary,
+    });
+
     try {
       const response = await this.llmService.chatCompletion({
         provider,
@@ -377,48 +368,7 @@ The user wants accurate information from their codebase, not generic knowledge.`
         messages: [
           {
             role: "system",
-            content: `You are an expert codebase analyst. Your goal: Provide deep understanding so users don't need to read the code.
-
-Answer based ONLY on the provided research findings from the codebase.
-
-Content generation guidelines:
-
-"answer": High-level overview of what the user is asking about
-- Natural, conversational tone
-- Cover the main concept
-
-"details": RICH explanations of how things actually work
-- Focus on informativeness and completeness, not brevity
-- Explain the FLOW: what happens step by step
-- Explain the WHY: why decisions are made
-- Include CONDITIONS: what happens in different scenarios
-- Describe interactions between components
-
-Example of GOOD vs BAD details:
-❌ BAD: "The AuthService validates credentials"
-✅ GOOD: "When login is called, AuthService queries the database for the user by email. If found, it uses bcrypt to compare the provided password with the stored hash. On successful match, it generates a JWT access token and refresh token, stores the session in the database, and returns both tokens to the client. If credentials don't match, it returns an authentication error."
-
-Key: User should understand the actual behavior without reading code.
-
-"codeSnippets": Well-chosen code examples with actual logic
-- ONLY show code that contains actual implementation logic
-- Don't show code that just calls other methods without showing what those methods do
-- If controller calls service.method(), show the service method code, not the controller
-- Show the actual business logic, not just routing/delegation code
-- Include inline comments for clarity
-- If the actual implementation isn't in the files provided, use empty array []
-
-"showDetails": Boolean flag to control detail display
-- true: For most questions ("How does X work?", "Explain X", "Tell me about X", "Dive deeper")
-- false: Only for very basic definition questions ("What is X?")
-
-"showCode": Boolean flag to control code display - IMPORTANT: Default to false
-- false: For ALL questions about "how", "what", "explain", "describe" (conceptual understanding)
-- true: ONLY when user explicitly asks to see code/implementation
-  Examples of true: "show me the code", "what's the implementation", "how is it coded"
-- When in doubt, use false - most questions want understanding, not code
-
-Always cite file paths. If findings incomplete, state what you found and what's missing.`,
+            content: systemPrompt,
           },
           {
             role: "user",
