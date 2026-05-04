@@ -65,7 +65,7 @@
     "pino-std-serializers": "^7.0.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "simple-git": "^3.28.0",
+    "simple-git": "^3.32.3",
     "traverse": "^0.6.11",
     "ts-morph": "^27.0.0",
     "uuid": "^13.0.0",
