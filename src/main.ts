@@ -28,8 +28,25 @@ export async function bootstrap() {
     defaultVersion: "1",
   });
 
+  const allowedOrigins = (process.env.CORS_ORIGINS_ALLOWED ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      // no-origin requests (MCP clients, server-to-server, curl) bypass the allowlist
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      // browser requests must match a configured origin; reject otherwise to avoid CSRF + credential theft
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`Origin ${origin} not allowed by CORS`));
+    },
     credentials: true,
   });
 
@@ -60,8 +77,8 @@ export async function bootstrap() {
 
     // setup openapi docs
     const config = new DocumentBuilder()
-      .setTitle("Knowhub API")
-      .setDescription("Knowhub API endpoints")
+      .setTitle("Code Chat API")
+      .setDescription("Code Chat API endpoints")
       .setVersion("1.0")
       .addBearerAuth()
       .addSecurityRequirements("bearer")
@@ -71,7 +88,9 @@ export async function bootstrap() {
     SwaggerModule.setup("openapi", app, document);
   }
 
-  await app.listen(4000);
+  // render injects PORT; local dev falls back to 4000 per CLAUDE.md
+  const port = Number(process.env.PORT ?? 4000);
+  await app.listen(port);
 }
 
 void bootstrap();
