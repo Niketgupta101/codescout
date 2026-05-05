@@ -3,6 +3,7 @@ import { AgentToolsService } from "./agent-tools.service";
 import { ConversationsService } from "../conversations/conversations.service";
 import { CodeFileLanguage, SymbolType } from "@prisma/client";
 import { LLMService } from "../llm/llm.service";
+import { EnvService } from "../env/env.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { LLMProvider } from "../llm/types/llm-provider.type";
 import type { LLMMessage } from "../llm/types/llm-message.type";
@@ -23,9 +24,14 @@ export class AgentService {
     readonly tools: AgentToolsService,
     readonly llmService: LLMService,
     readonly prisma: PrismaService,
+    readonly envService: EnvService,
     @Inject(forwardRef(() => ConversationsService))
     readonly conversationsService: ConversationsService,
   ) {}
+
+  _resolveTimeoutMs(requestTimeoutMs: number | undefined): number {
+    return requestTimeoutMs ?? this.envService.get("AGENT_TIMEOUT_MS") ?? 180_000;
+  }
 
   /**
    * Execute agent query with tool calling loop
@@ -38,7 +44,7 @@ export class AgentService {
   ): Promise<AgentResponse> {
     const startTime = Date.now();
     const maxIterations = request.maxIterations ?? 15;
-    const timeoutMs = request.timeoutMs ?? 30000;
+    const timeoutMs = this._resolveTimeoutMs(request.timeoutMs);
 
     this.logger.log(`Agent query: "${request.query}" (${provider}/${model})`);
 
@@ -172,7 +178,7 @@ export class AgentService {
   ): Promise<AgentResponse> {
     const startTime = Date.now();
     const maxIterations = request.maxIterations ?? 15;
-    const timeoutMs = request.timeoutMs ?? 30000;
+    const timeoutMs = this._resolveTimeoutMs(request.timeoutMs);
 
     this.logger.log(
       `Agent query with context (${conversationContext.length} messages): "${request.query}" (${provider}/${model})`,

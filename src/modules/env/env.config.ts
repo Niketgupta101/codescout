@@ -68,4 +68,8 @@ export class EnvConfig {
   @IsOptional()
   @IsString()
   MCP_AUTH_TOKEN?: string;
+
+  @IsOptional()
+  @IsNumber()
+  AGENT_TIMEOUT_MS?: number;
 }
