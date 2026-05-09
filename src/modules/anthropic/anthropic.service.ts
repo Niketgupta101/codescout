@@ -48,10 +48,11 @@ export class AnthropicService {
     const anthropicTools = structuredOutputTool ? [structuredOutputTool] : callerTools.length > 0 ? callerTools : undefined;
 
     // mark the system prompt as a cache breakpoint so anthropic caches it (and the tools array, which sits before it in the prefix)
-    // cache write costs ~1.25x normal and read costs ~0.1x — a net win as soon as the same prefix is used twice within the 5min ttl
-    // when system prompt is below ~1024 tokens anthropic ignores the marker, so this is safe even for short prompts
+    // ttl "1h" extends the cache lifetime from the default 5m to 1h — write costs ~2x vs ~1.25x for 5m, but reads stay the same
+    // 1h matches realistic user pacing on multi-turn conversations (humans pause minutes between questions); 5m default missed the cache constantly in production
+    // when the prompt is below ~1024 tokens anthropic ignores the marker, so this is safe even for short prompts
     const systemWithCacheControl: Anthropic.TextBlockParam[] | undefined = options.systemPrompt
-      ? [{ type: "text", text: options.systemPrompt, cache_control: { type: "ephemeral" } }]
+      ? [{ type: "text", text: options.systemPrompt, cache_control: { type: "ephemeral", ttl: "1h" } }]
       : undefined;
 
     const response = await this.anthropic.messages.create({

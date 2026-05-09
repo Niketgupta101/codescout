@@ -708,7 +708,8 @@ Answer the question based on these findings:`,
           projectId,
           args.query as string,
           args.documentTypes as string[] | undefined,
-          args.topK as number | undefined,
+          // coerce in case the model returns topK as a string despite the schema declaring number — `as` is a type assertion only, not a runtime cast
+          args.topK !== undefined ? Number(args.topK) : undefined,
         );
 
       case "search_conversation_history":
@@ -721,7 +722,8 @@ Answer the question based on these findings:`,
         return this.conversationsService.searchHistory(
           conversationId,
           args.query as string,
-          args.topK as number | undefined,
+          // coerce in case the model returns topK as a string despite the schema declaring number
+          args.topK !== undefined ? Number(args.topK) : undefined,
         );
 
       default:
@@ -823,7 +825,7 @@ Answer the question based on these findings:`,
               "Optional filter by document types: tech_spec, user_stories, meeting_notes, requirements, design_doc, backend_codebase, web_codebase, app_codebase, custom",
           },
           topK: {
-            type: "string",
+            type: "number",
             description: "Number of results to return (default: 10)",
           },
         },
@@ -844,7 +846,7 @@ Answer the question based on these findings:`,
               'What to search for in conversation history (e.g., "authentication discussion", "earlier solution")',
           },
           topK: {
-            type: "string",
+            type: "number",
             description: "Number of past messages to retrieve (default: 3)",
           },
         },
