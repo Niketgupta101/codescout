@@ -12,9 +12,13 @@ import { AgentQuery } from "./types/agent-query.type";
 import { AgentResponse } from "./types/agent-response.type";
 import { AgentLLMAnswerToQuery } from "./types/agent-llm-answer-to-query.type";
 import { AgentFormatProjectContextOptions } from "./types/agent-format-project-context-options.type";
+import { AgentIterationUsage } from "./types/agent-iteration-usage.type";
+import { AgentTokenUsage } from "./types/agent-token-usage.type";
+import { AgentAnswerGenerationResult } from "./types/agent-answer-generation-result.type";
 import { formatProjectContextSection } from "./utils/format-project-context.util";
 import { buildAgentSystemPrompt } from "./utils/build-agent-system-prompt.util";
 import { buildAnswerGenerationPrompt } from "./utils/build-answer-generation-prompt.util";
+import { sumAgentTokenUsage } from "./utils/sum-agent-token-usage.util";
 
 @Injectable()
 export class AgentService {
@@ -49,6 +53,7 @@ export class AgentService {
     this.logger.log(`Agent query: "${request.query}" (${provider}/${model})`);
 
     const toolCalls: AgentResponse["toolCalls"] = [];
+    const iterationsUsage: AgentIterationUsage[] = [];
 
     // fetch once per request and reuse for both the research prompt and the answer prompt
     const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
@@ -101,6 +106,8 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
+        const toolCallIdsForThisIteration: string[] = [];
+
         // execute each tool call
         for (const toolCall of response.toolCalls) {
           const toolName = toolCall.name;
@@ -111,13 +118,16 @@ export class AgentService {
           // execute tool
           const result = await this._executeTool(projectId, toolName, toolArgs, undefined);
 
-          // record tool call
+          // record tool call (iteration stamps the loop turn that produced this tool call so token usage can be cross-referenced)
           toolCalls.push({
             id: toolCall.id,
             tool: toolName,
             args: toolArgs,
             result,
+            iteration: iterations,
           });
+
+          toolCallIdsForThisIteration.push(toolCall.id);
 
           // add tool result to messages
           messages.push({
@@ -129,12 +139,26 @@ export class AgentService {
           });
         }
 
+        // record iteration usage now that we know which tool calls came out of this LLM response
+        iterationsUsage.push({
+          iteration: iterations,
+          toolCallIds: toolCallIdsForThisIteration,
+          usage: response.usage,
+        });
+
         // continue loop (LLM will process tool results)
         continue;
       }
 
       // no tool calls - agent has gathered information, now generate final answer
       if (response.content) {
+        // record terminal iteration's usage; toolCallIds is empty because the LLM chose to answer instead of calling tools
+        iterationsUsage.push({
+          iteration: iterations,
+          toolCallIds: [],
+          usage: response.usage,
+        });
+
         const durationMs = Date.now() - startTime;
 
         this.logger.log(
@@ -142,7 +166,7 @@ export class AgentService {
         );
         this.logger.log(`Generating final answer from research findings...`);
 
-        const finalAnswer = await this._generateAnswer({
+        const answerGenerationResult = await this._generateAnswer({
           query: request.query,
           agentFindings: response.content,
           projectContext,
@@ -150,12 +174,14 @@ export class AgentService {
           model,
         });
 
-        return {
-          answer: finalAnswer,
+        return this._buildAgentResponse({
+          answer: answerGenerationResult.formattedAnswer,
           toolCalls,
           iterations,
           durationMs,
-        };
+          iterationsUsage,
+          answerGenerationUsage: answerGenerationResult.usage,
+        });
       }
 
       // edge case: no content and no tool calls
@@ -185,6 +211,7 @@ export class AgentService {
     );
 
     const toolCalls: AgentResponse["toolCalls"] = [];
+    const iterationsUsage: AgentIterationUsage[] = [];
 
     // fetch once per request and reuse for both the research prompt and the answer prompt
     const projectContext = await this._fetchProjectContextForSystemPrompt(projectId);
@@ -238,6 +265,8 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
+        const toolCallIdsForThisIteration: string[] = [];
+
         // execute each tool call
         for (const toolCall of response.toolCalls) {
           const toolName = toolCall.name;
@@ -248,13 +277,16 @@ export class AgentService {
           // execute tool
           const result = await this._executeTool(projectId, toolName, toolArgs, conversationId);
 
-          // record tool call
+          // record tool call (iteration stamps the loop turn that produced this tool call so token usage can be cross-referenced)
           toolCalls.push({
             id: toolCall.id,
             tool: toolName,
             args: toolArgs,
             result,
+            iteration: iterations,
           });
+
+          toolCallIdsForThisIteration.push(toolCall.id);
 
           // add tool result to messages
           messages.push({
@@ -266,12 +298,26 @@ export class AgentService {
           });
         }
 
+        // record iteration usage now that we know which tool calls came out of this LLM response
+        iterationsUsage.push({
+          iteration: iterations,
+          toolCallIds: toolCallIdsForThisIteration,
+          usage: response.usage,
+        });
+
         // continue loop (LLM will process tool results)
         continue;
       }
 
       // no tool calls - agent has gathered information, now generate final answer
       if (response.content) {
+        // record terminal iteration's usage; toolCallIds is empty because the LLM chose to answer instead of calling tools
+        iterationsUsage.push({
+          iteration: iterations,
+          toolCallIds: [],
+          usage: response.usage,
+        });
+
         const durationMs = Date.now() - startTime;
 
         this.logger.log(
@@ -279,7 +325,7 @@ export class AgentService {
         );
         this.logger.log(`Generating final answer from research findings...`);
 
-        const finalAnswer = await this._generateAnswer({
+        const answerGenerationResult = await this._generateAnswer({
           query: request.query,
           agentFindings: response.content,
           projectContext,
@@ -287,12 +333,14 @@ export class AgentService {
           model,
         });
 
-        return {
-          answer: finalAnswer,
+        return this._buildAgentResponse({
+          answer: answerGenerationResult.formattedAnswer,
           toolCalls,
           iterations,
           durationMs,
-        };
+          iterationsUsage,
+          answerGenerationUsage: answerGenerationResult.usage,
+        });
       }
 
       // edge case: no content and no tool calls
@@ -345,6 +393,39 @@ export class AgentService {
     };
   }
 
+  // assembles the public AgentResponse and computes totalUsage from the loop's iterations + the answer-generation call
+  // separated so both query() and queryWithContext() return the same shape with no duplicated math
+  _buildAgentResponse({
+    answer,
+    toolCalls,
+    iterations,
+    durationMs,
+    iterationsUsage,
+    answerGenerationUsage,
+  }: {
+    answer: string;
+    toolCalls: AgentResponse["toolCalls"];
+    iterations: number;
+    durationMs: number;
+    iterationsUsage: AgentIterationUsage[];
+    answerGenerationUsage: AgentTokenUsage;
+  }): AgentResponse {
+    const totalUsage = sumAgentTokenUsage([
+      ...iterationsUsage.map((iterationUsage) => iterationUsage.usage),
+      answerGenerationUsage,
+    ]);
+
+    return {
+      answer,
+      toolCalls,
+      iterations,
+      durationMs,
+      iterationsUsage,
+      answerGenerationUsage,
+      totalUsage,
+    };
+  }
+
   /**
    * Generate final answer from agent's research findings.
    * Uses structured outputs to enforce response format.
@@ -361,7 +442,7 @@ export class AgentService {
     projectContext: AgentFormatProjectContextOptions;
     provider: LLMProvider;
     model: string;
-  }): Promise<string> {
+  }): Promise<AgentAnswerGenerationResult> {
     const systemPrompt = buildAnswerGenerationPrompt({
       projectName: projectContext.projectName,
       projectSummary: projectContext.projectSummary,
@@ -444,7 +525,11 @@ Answer the question based on these findings:`,
       }
 
       const parsedAnswer = JSON.parse(response.content) as AgentLLMAnswerToQuery;
-      return this._formatAnswer(parsedAnswer);
+
+      return {
+        formattedAnswer: this._formatAnswer(parsedAnswer),
+        usage: response.usage,
+      };
     } catch (error) {
       this.logger.error("Failed to generate answer", error);
       throw error;
