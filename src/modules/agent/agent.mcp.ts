@@ -19,9 +19,10 @@ export class AgentMcp {
   @Tool({
     name: "codeFileSearch",
     description:
-      "Find files in a project by semantic similarity to a natural-language query. " +
-      "Searches over file summaries, not raw content — best for 'which file handles X' questions. " +
-      "Returns ranked file paths with summaries. Read individual files via codeFileRead.",
+      "PREFERRED entry point for code questions when you can drive your own search → read → synthesize loop. " +
+      "Finds files by semantic similarity to a natural-language query (over file summaries, not raw content). " +
+      "Returns ranked file paths with summaries. Pair with codeFileRead and symbolSearch to investigate further. " +
+      "Lower latency, lower cost, and more flexibility than chatMessageCreate for agentic clients.",
     parameters: CodeFileSearchSchema,
   })
   async codeFileSearch(codeFileSearchInput: CodeFileSearchInput, _context: Context, request?: McpToolRequest) {
@@ -44,8 +45,8 @@ export class AgentMcp {
     name: "codeFileRead",
     description:
       "Read the full raw content of a single file by its path. " +
-      "Use this after codeFileSearch to inspect a specific file. " +
-      "For broader questions about a codebase, prefer chatMessageCreate which orchestrates multiple reads.",
+      "Use after codeFileSearch or symbolSearch when you need the actual implementation. " +
+      "Combine with codeFileSearch and symbolSearch to drive your own exploration loop instead of delegating via chatMessageCreate.",
     parameters: CodeFileReadSchema,
   })
   async codeFileRead(codeFileReadInput: CodeFileReadInput, _context: Context, request?: McpToolRequest) {
@@ -64,7 +65,7 @@ export class AgentMcp {
     description:
       "Find symbols (classes, functions, types, etc.) by name across an indexed project. " +
       "Returns symbol name, kind, and the file it lives in. " +
-      "Use this for fast lookup when you already know a symbol name; for discovery use codeFileSearch or chatMessageCreate.",
+      "Fastest path when you already know a symbol name; for free-form discovery use codeFileSearch.",
     parameters: SymbolSearchSchema,
   })
   async symbolSearch(symbolSearchInput: SymbolSearchInput, _context: Context, request?: McpToolRequest) {

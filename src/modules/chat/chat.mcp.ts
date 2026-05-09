@@ -25,11 +25,9 @@ export class ChatMcp {
   @Tool({
     name: "chatMessageCreate",
     description:
-      "Ask a natural-language question about a project's codebase or documentation. " +
-      "Returns a structured answer with code citations. " +
-      "Use this for any question requiring synthesis across files (architecture, " +
-      "'how does X work', 'where is Y used'). " +
-      "Do NOT use for simple file reads — use codeFileRead instead. " +
+      "Delegate a codebase question to a server-side agent that drives its own search → read → synthesize loop and returns a structured answer with code citations. " +
+      "PREFER codeFileSearch + codeFileRead + symbolSearch for ad-hoc questions you can drive yourself — those are cheaper, faster, and more flexible. " +
+      "Use chatMessageCreate when: (a) you specifically need the structured {answer, details, codeSnippets} shape, (b) you need server-side conversation persistence, or (c) you're forwarding a question from a non-agentic consumer. " +
       "When conversationId is omitted, a new conversation is started with the given model and provider.",
     parameters: ChatMessageCreateSchema,
   })

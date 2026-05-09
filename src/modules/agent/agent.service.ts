@@ -712,14 +712,23 @@ Answer the question based on these findings:`,
       case "get_directory":
         return this.tools.getDirectory(projectId, args.path as string);
 
-      case "search_files":
+      case "search_files": {
+        // coerce documentTypes to string[] — some models still send a single string despite the array schema; wrap defensively so .join() etc. don't blow up
+        const rawDocumentTypes = args.documentTypes;
+        const documentTypes = Array.isArray(rawDocumentTypes)
+          ? (rawDocumentTypes as string[])
+          : typeof rawDocumentTypes === "string" && rawDocumentTypes.length > 0
+            ? [rawDocumentTypes]
+            : undefined;
+
         return this.tools.searchFiles(
           projectId,
           args.query as string,
-          args.documentTypes as string[] | undefined,
+          documentTypes,
           // coerce in case the model returns topK as a string despite the schema declaring number — `as` is a type assertion only, not a runtime cast
           args.topK !== undefined ? Number(args.topK) : undefined,
         );
+      }
 
       case "search_conversation_history":
         if (!conversationId) {
@@ -850,9 +859,10 @@ Answer the question based on these findings:`,
               'Expanded natural language query with synonyms for better vector similarity matching. GOOD: "user registration signup create account flow", BAD: "register". Include multiple related terms in one query.',
           },
           documentTypes: {
-            type: "string",
+            type: "array",
+            items: { type: "string" },
             description:
-              "Optional filter by document types: tech_spec, user_stories, meeting_notes, requirements, design_doc, backend_codebase, web_codebase, app_codebase, custom",
+              "Optional array of document types to filter by. Allowed values: technicalSpecification, userStories, meetingNotes, custom, backendCodebase, webCodebase, appCodebase. Pass an array even if filtering on a single type.",
           },
           topK: {
             type: "number",

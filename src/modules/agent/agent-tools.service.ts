@@ -29,13 +29,18 @@ export class AgentToolsService {
     try {
       this.logger.debug(`listFiles(regex=${regex ?? ""})`);
 
+      // strip glob wildcards — prisma's `contains` is a substring match, not a regex/glob, so wildcards aren't meaningful
+      // accept the param name "regex" for backward compatibility but treat it as a substring filter on fullPath
+      const substring = regex?.replace(/\*/g, "").trim();
+
       const files = await this.prisma.codeFile.findMany({
         where: {
           projectId,
-          ...(regex
+          ...(substring
             ? {
-                path: {
-                  contains: regex.replace("*", ""),
+                fullPath: {
+                  contains: substring,
+                  mode: "insensitive",
                 },
               }
             : {}),
