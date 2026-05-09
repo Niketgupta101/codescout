@@ -12,6 +12,10 @@ import { AgentToolListFileDto } from "./dtos/agent-tool-list-file.dto";
 import { AgentToolSearchSymbol } from "./dtos/agent-tool-search-symbol.dto";
 import { AgentToolSearchCodeDto } from "./dtos/agent-tool-search-code.dto";
 
+// safety cap on the number of lines a single read returns, applied to both readFile (whole-file) and readFileRange (specific span)
+// chosen to be generous enough that typical service files (200-1500 lines) fit unclipped, while bounding pathological cases (giant generated files)
+const MAX_READ_FILE_LINES = 1500;
+
 @Injectable()
 export class AgentToolsService {
   readonly logger = new Logger(AgentToolsService.name);
@@ -85,17 +89,111 @@ export class AgentToolsService {
         };
       }
 
+      const allLines = file.rawContent.split("\n");
+      const totalLines = allLines.length;
+      const truncated = totalLines > MAX_READ_FILE_LINES;
+
+      // emit either the whole file or just the first MAX_READ_FILE_LINES lines, with an explicit marker so the agent knows to call read_file_range for more
+      const returnedLines = truncated ? allLines.slice(0, MAX_READ_FILE_LINES) : allLines;
+      let content = returnedLines.join("\n");
+
+      if (truncated) {
+        content += `\n\n[file truncated at line ${MAX_READ_FILE_LINES} of ${totalLines} — call read_file_range(filePath, startLine, endLine) to fetch a specific span]`;
+      }
+
       return {
         success: true,
         data: {
           path: file.fullPath,
           language: file.language,
-          content: file.rawContent,
+          content,
           metadata: file.metadata,
+          totalLines,
+          returnedLineRange: { start: 1, end: returnedLines.length },
+          truncated,
         },
       };
     } catch (error) {
       this.logger.error("Failed to read file", error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async readFileRange(
+    projectId: string,
+    filePath: string,
+    startLine: number,
+    endLine: number,
+  ): Promise<ToolResult<AgentToolReadFileResult>> {
+    try {
+      this.logger.debug(`readFileRange(path=${filePath}, lines=${startLine}-${endLine})`);
+
+      // validate the requested range early — invalid input would silently produce empty or garbage output otherwise
+      if (
+        !Number.isInteger(startLine) ||
+        !Number.isInteger(endLine) ||
+        startLine < 1 ||
+        endLine < startLine
+      ) {
+        return {
+          success: false,
+          error: `Invalid line range: startLine=${startLine}, endLine=${endLine}. Must satisfy 1 <= startLine <= endLine.`,
+        };
+      }
+
+      const file = await this.prisma.codeFile.findFirst({
+        where: {
+          projectId,
+          fullPath: filePath,
+        },
+        select: {
+          fullPath: true,
+          language: true,
+          rawContent: true,
+          metadata: true,
+        },
+      });
+
+      if (!file) {
+        return {
+          success: false,
+          error: `File not found: ${filePath}`,
+        };
+      }
+
+      const allLines = file.rawContent.split("\n");
+      const totalLines = allLines.length;
+
+      // clamp end to file length — asking past EOF is fine, just return what exists
+      // separately, cap the range size at MAX_READ_FILE_LINES so a single call can't pull arbitrarily large spans
+      const clampedEnd = Math.min(endLine, totalLines);
+      const cappedEnd = Math.min(clampedEnd, startLine + MAX_READ_FILE_LINES - 1);
+      const truncated = cappedEnd < clampedEnd;
+
+      const returnedLines = allLines.slice(startLine - 1, cappedEnd);
+      let content = returnedLines.join("\n");
+
+      if (truncated) {
+        content += `\n\n[range capped at line ${cappedEnd} (${MAX_READ_FILE_LINES} max) — call read_file_range again with a later startLine to continue]`;
+      }
+
+      return {
+        success: true,
+        data: {
+          path: file.fullPath,
+          language: file.language,
+          content,
+          metadata: file.metadata,
+          totalLines,
+          returnedLineRange: { start: startLine, end: cappedEnd },
+          truncated,
+        },
+      };
+    } catch (error) {
+      this.logger.error("Failed to read file range", error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),

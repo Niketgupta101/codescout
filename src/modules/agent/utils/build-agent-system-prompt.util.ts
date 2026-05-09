@@ -6,7 +6,8 @@ export type BuildAgentSystemPromptOptions = {
 
 const BASE_TOOL_DESCRIPTIONS = [
   "- search_files: semantic search over file summaries. Use synonym-rich queries; retry 2-3 times with different wording before giving up. Returns file paths + summaries.",
-  "- read_file: full file content. REQUIRED before claiming anything about a file's behavior.",
+  "- read_file: file content (whole file if ≤1500 lines, else first 1500 with a truncation marker). REQUIRED before claiming anything about a file's behavior.",
+  "- read_file_range: read a specific line range of a file (1-indexed, max 1500 lines per call). Token-efficient — prefer over read_file when you only need a section of a large file.",
   "- search_symbols: exact or partial name match for functions, classes, types, enums.",
   "- search_code: regex over file content. Use when you have a known string or pattern but not a symbol name.",
   "- get_file_tree: hierarchical project structure.",
@@ -93,6 +94,8 @@ ${tools.join("\n")}
 - Cite file paths in your findings. Every claim needs a file behind it.
 - Summaries are for discovery only — read_file before claiming anything about a file's behavior.
 - Read the implementation, not just the entry point. Controller → service → helper.
+- If a file's content is already visible in your conversation context from an earlier tool result, reuse it instead of re-reading. Only re-read if you need a different file or a different range than what's already shown.
+- Prefer read_file_range over read_file when you know roughly which section matters (e.g. search_symbols told you the file but you only need that one symbol's body). Whole-file reads are fine for small files; expensive on large ones.
 - If 2-3 search_files queries with different synonyms return nothing useful, stop and say "I cannot find [feature] in this codebase". Don't loop forever.
 `;
 };

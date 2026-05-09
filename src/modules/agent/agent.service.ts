@@ -685,6 +685,15 @@ Answer the question based on these findings:`,
       case "read_file":
         return this.tools.readFile(projectId, args.filePath as string);
 
+      case "read_file_range":
+        return this.tools.readFileRange(
+          projectId,
+          args.filePath as string,
+          // coerce in case the model returns these as strings despite the schema declaring number
+          Number(args.startLine),
+          Number(args.endLine),
+        );
+
       case "search_symbols":
         return this.tools.searchSymbols(projectId, {
           name: args.name as string,
@@ -751,7 +760,8 @@ Answer the question based on these findings:`,
       },
       {
         name: "read_file",
-        description: "Read the full content of a specific file. Returns file path, language, content, and metadata.",
+        description:
+          "Read a file's content. Returns the whole file when it fits within 1500 lines; otherwise returns the first 1500 lines with a truncation marker — call read_file_range for specific spans. Prefer read_file_range when you only need a known section of a large file.",
         parameters: {
           filePath: {
             type: "string",
@@ -759,6 +769,26 @@ Answer the question based on these findings:`,
           },
         },
         required: ["filePath"],
+      },
+      {
+        name: "read_file_range",
+        description:
+          "Read a specific line range of a file. Token-efficient — use when you only need one function or section of a large file (e.g. when search_symbols told you which file but a small portion is enough). Range size is capped at 1500 lines per call.",
+        parameters: {
+          filePath: {
+            type: "string",
+            description: "The path of the file to read",
+          },
+          startLine: {
+            type: "number",
+            description: "First line to include (1-indexed)",
+          },
+          endLine: {
+            type: "number",
+            description: "Last line to include (1-indexed, inclusive)",
+          },
+        },
+        required: ["filePath", "startLine", "endLine"],
       },
       {
         name: "search_symbols",
