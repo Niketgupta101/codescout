@@ -80,8 +80,11 @@ export class ParsersService {
     if ([".yml", ".yaml"].includes(ext)) return "yaml";
     if (ext === ".prisma") return "prisma";
     if (ext === ".pdf") return "pdf";
-    if ([".md", ".markdown"].includes(ext)) return "markdown";
+    // mdx is markdown with embedded jsx; the markdown parser still extracts headings, jsx falls through into rawContent
+    if ([".md", ".markdown", ".mdx"].includes(ext)) return "markdown";
     if (ext === ".csv") return "csv";
+    // css/scss have no extracted symbol structure today; plaintext keeps them searchable via search_files (semantic) and search_code (regex)
+    if ([".css", ".scss"].includes(ext)) return "plaintext";
     if ([".gitignore", ".env", ".example", ".npmrc", ".nvmrc"].includes(basename) || basename.startsWith(".")) {
       return "plaintext";
     }

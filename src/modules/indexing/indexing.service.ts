@@ -19,6 +19,7 @@ import {
 } from "./utils/build-directory-tree.util";
 import { buildEmptyIndexingTokenAccumulator, logIndexingCostBreakdown } from "./utils/indexing-cost.util";
 import { buildRepositoryIndexFileFilter } from "./utils/repository-file-filter.util";
+import { detectNextJsFileMetadata } from "./utils/detect-nextjs-file-metadata.util";
 import { OpenAiFileOrDirectoryPathSummary } from "../openai/types/openai-file-or-directory-path-summary.type";
 
 const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
@@ -322,6 +323,13 @@ export class IndexingService {
           tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
           tokenAccumulator.fileEmbeddingCallCount += 1;
 
+          // detect next.js role + runtime so overview-type queries can filter without re-parsing
+          // safe to run on non-next.js repos: returns an empty object when nothing matches
+          const nextJsFileMetadata = detectNextJsFileMetadata({
+            fullPath,
+            rawContent: file.content,
+          });
+
           // create CodeFile record
           const codeFile = await this.prisma.codeFile.create({
             data: {
@@ -336,6 +344,7 @@ export class IndexingService {
                 commitHash,
                 repoUrl: url,
                 lines: file.content.split("\n").length,
+                ...nextJsFileMetadata,
               },
             },
           });

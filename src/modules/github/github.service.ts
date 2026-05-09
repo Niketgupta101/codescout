@@ -68,7 +68,18 @@ export class GithubService {
 
   async listCodeFiles(repoPath: string, filterConfig: FileFilterConfig = {}): Promise<CodeFile[]> {
     const {
-      include = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.json", "**/*.md", "**/*.markdown"],
+      include = [
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.mdx",
+        "**/*.json",
+        "**/*.md",
+        "**/*.markdown",
+        "**/*.css",
+        "**/*.scss",
+      ],
       exclude = ["node_modules/**", "dist/**", "build/**", "**/*.spec.ts", "**/*.test.ts"],
       respectGitignore = true,
     } = filterConfig;
@@ -237,7 +248,10 @@ export class GithubService {
     if ([".yml", ".yaml"].includes(ext)) return "yaml";
     if (ext === ".prisma") return "prisma";
     if (ext === ".pdf") return "pdf";
-    if ([".md", ".markdown"].includes(ext)) return "markdown";
+    // mdx is markdown with embedded jsx; treat as markdown so headings still extract as symbols and the jsx falls into rawContent
+    if ([".md", ".markdown", ".mdx"].includes(ext)) return "markdown";
+    // css/scss carry no symbol structure we extract; route them through the plaintext path so search_files + search_code still cover them
+    if ([".css", ".scss"].includes(ext)) return "plaintext";
     if ([".gitignore", ".env", ".example", ".npmrc", ".nvmrc", ".prettierrc", ".eslintrc"].includes(fileName)) {
       return "plaintext";
     }

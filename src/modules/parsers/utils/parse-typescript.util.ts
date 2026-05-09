@@ -2,6 +2,7 @@ import {
   Project,
   SourceFile,
   ClassDeclaration,
+  ExportAssignment,
   FunctionDeclaration,
   MethodDeclaration,
   InterfaceDeclaration,
@@ -13,6 +14,7 @@ import {
 import type { ASTNode } from "../../../types/ast-node.type";
 import type { CodeMetadata } from "../../../types/code-metadata.type";
 import type { ParsedDocument } from "../types/parsed-document.type";
+import { deriveDefaultExportSymbolName } from "./derive-default-export-symbol-name.util";
 
 export const parseTypescript = (filePath: string, content: string): ParsedDocument => {
   const project = new Project({
@@ -25,12 +27,12 @@ export const parseTypescript = (filePath: string, content: string): ParsedDocume
   });
 
   const sourceFile = project.createSourceFile(filePath, content);
-  const astNodes = extractTypescriptStructures(sourceFile);
+  const astNodes = extractTypescriptStructures(sourceFile, filePath);
 
   return convertAstNodesToParsedDocument(filePath, astNodes);
 };
 
-const extractTypescriptStructures = (sourceFile: SourceFile): ASTNode[] => {
+const extractTypescriptStructures = (sourceFile: SourceFile, filePath: string): ASTNode[] => {
   const nodes: ASTNode[] = [];
 
   for (const classDecl of sourceFile.getClasses()) {
@@ -59,6 +61,23 @@ const extractTypescriptStructures = (sourceFile: SourceFile): ASTNode[] => {
       if (initializer && Node.isArrowFunction(initializer)) {
         nodes.push(extractTypescriptArrowFunction(declaration, sourceFile));
       }
+    }
+  }
+
+  // anonymous default-export functions (e.g. next.js: export default () => <div />)
+  // skip cases where the default export references a named symbol — those are already extracted by the loops above
+  for (const exportAssignment of sourceFile.getExportAssignments()) {
+    // ignore CommonJS-style "export = X"; only handle "export default X"
+    if (exportAssignment.isExportEquals()) {
+      continue;
+    }
+
+    const expression = exportAssignment.getExpression();
+
+    // only synthesize a symbol when the default export is an inline function literal
+    // (named identifiers, calls, object literals etc. are out of scope; named symbols are already covered)
+    if (Node.isArrowFunction(expression) || Node.isFunctionExpression(expression)) {
+      nodes.push(extractTypescriptAnonymousDefaultExport(exportAssignment, sourceFile, filePath));
     }
   }
 
@@ -292,6 +311,58 @@ const extractTypescriptArrowFunction = (declaration: VariableDeclaration, source
     parameters,
     returnType,
     isExported,
+    isAsync,
+    jsDoc,
+    imports: extractTypescriptImports(sourceFile),
+    complexity: calculateTypescriptComplexity(content),
+  };
+
+  return {
+    type: "function",
+    name,
+    content,
+    metadata,
+  };
+};
+
+const extractTypescriptAnonymousDefaultExport = (
+  exportAssignment: ExportAssignment,
+  sourceFile: SourceFile,
+  filePath: string,
+): ASTNode => {
+  const expression = exportAssignment.getExpression();
+
+  if (!Node.isArrowFunction(expression) && !Node.isFunctionExpression(expression)) {
+    throw new Error("extractTypescriptAnonymousDefaultExport called on a non-function expression");
+  }
+
+  // synthesize a meaningful name from the file path so search_symbols finds it
+  // e.g. app/users/page.tsx -> "UsersPage", components/Button/index.tsx -> "Button"
+  const name = deriveDefaultExportSymbolName(filePath);
+
+  const isAsync = expression.isAsync();
+  const parameters = expression.getParameters().map((param) => `${param.getName()}: ${param.getType().getText()}`);
+  const returnType = expression.getReturnType().getText();
+
+  const jsDocComments = exportAssignment.getJsDocs();
+  const jsDoc = jsDocComments.length > 0 ? jsDocComments[0].getDescription().trim() : undefined;
+
+  // span the entire "export default ..." statement so we capture the export keyword + the function body
+  const startLine = sourceFile.getLineAndColumnAtPos(exportAssignment.getStart()).line;
+  const endLine = sourceFile.getLineAndColumnAtPos(exportAssignment.getEnd()).line;
+
+  const content = exportAssignment.getText();
+
+  const metadata: CodeMetadata = {
+    startLine,
+    endLine,
+    language: "typescript",
+    chunkType: Node.isArrowFunction(expression) ? "arrow-function" : "function",
+    name,
+    parameters,
+    returnType,
+    // it's a default export, so always exported
+    isExported: true,
     isAsync,
     jsDoc,
     imports: extractTypescriptImports(sourceFile),
