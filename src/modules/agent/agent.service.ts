@@ -15,6 +15,8 @@ import { AgentFormatProjectContextOptions } from "./types/agent-format-project-c
 import { AgentIterationUsage } from "./types/agent-iteration-usage.type";
 import { AgentTokenUsage } from "./types/agent-token-usage.type";
 import { AgentAnswerGenerationResult } from "./types/agent-answer-generation-result.type";
+import { AgentExecutedToolCallBundle } from "./types/agent-executed-tool-call-bundle.type";
+import type { LLMToolCall } from "../llm/types/llm-message.type";
 import { formatProjectContextSection } from "./utils/format-project-context.util";
 import { buildAgentSystemPrompt } from "./utils/build-agent-system-prompt.util";
 import { buildAnswerGenerationPrompt } from "./utils/build-answer-generation-prompt.util";
@@ -106,35 +108,34 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
+        // execute tool calls in parallel — independent reads/searches don't need to wait on each other
+        // Promise.all preserves array order so the resolved bundles line up with the LLM's original tool_calls order
+        const executedToolCallBundles = await this._executeToolCallsInParallel({
+          projectId,
+          toolCalls: response.toolCalls,
+          conversationId: undefined,
+        });
+
         const toolCallIdsForThisIteration: string[] = [];
 
-        // execute each tool call
-        for (const toolCall of response.toolCalls) {
-          const toolName = toolCall.name;
-          const toolArgs = toolCall.arguments;
-
-          this.logger.debug(`Calling tool: ${toolName}(${JSON.stringify(toolArgs)})`);
-
-          // execute tool
-          const result = await this._executeTool(projectId, toolName, toolArgs, undefined);
-
+        for (const bundle of executedToolCallBundles) {
           // record tool call (iteration stamps the loop turn that produced this tool call so token usage can be cross-referenced)
           toolCalls.push({
-            id: toolCall.id,
-            tool: toolName,
-            args: toolArgs,
-            result,
+            id: bundle.toolCallId,
+            tool: bundle.toolName,
+            args: bundle.toolArgs,
+            result: bundle.result,
             iteration: iterations,
           });
 
-          toolCallIdsForThisIteration.push(toolCall.id);
+          toolCallIdsForThisIteration.push(bundle.toolCallId);
 
-          // add tool result to messages
+          // add tool result to messages — must stay in original order so the LLM sees them in the order it asked
           messages.push({
             role: "tool",
             toolResult: {
-              toolCallId: toolCall.id,
-              content: JSON.stringify(result),
+              toolCallId: bundle.toolCallId,
+              content: JSON.stringify(bundle.result),
             },
           });
         }
@@ -265,35 +266,34 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
+        // execute tool calls in parallel — independent reads/searches don't need to wait on each other
+        // Promise.all preserves array order so the resolved bundles line up with the LLM's original tool_calls order
+        const executedToolCallBundles = await this._executeToolCallsInParallel({
+          projectId,
+          toolCalls: response.toolCalls,
+          conversationId,
+        });
+
         const toolCallIdsForThisIteration: string[] = [];
 
-        // execute each tool call
-        for (const toolCall of response.toolCalls) {
-          const toolName = toolCall.name;
-          const toolArgs = toolCall.arguments;
-
-          this.logger.debug(`Calling tool: ${toolName}(${JSON.stringify(toolArgs)})`);
-
-          // execute tool
-          const result = await this._executeTool(projectId, toolName, toolArgs, conversationId);
-
+        for (const bundle of executedToolCallBundles) {
           // record tool call (iteration stamps the loop turn that produced this tool call so token usage can be cross-referenced)
           toolCalls.push({
-            id: toolCall.id,
-            tool: toolName,
-            args: toolArgs,
-            result,
+            id: bundle.toolCallId,
+            tool: bundle.toolName,
+            args: bundle.toolArgs,
+            result: bundle.result,
             iteration: iterations,
           });
 
-          toolCallIdsForThisIteration.push(toolCall.id);
+          toolCallIdsForThisIteration.push(bundle.toolCallId);
 
-          // add tool result to messages
+          // add tool result to messages — must stay in original order so the LLM sees them in the order it asked
           messages.push({
             role: "tool",
             toolResult: {
-              toolCallId: toolCall.id,
-              content: JSON.stringify(result),
+              toolCallId: bundle.toolCallId,
+              content: JSON.stringify(bundle.result),
             },
           });
         }
@@ -414,6 +414,13 @@ export class AgentService {
       ...iterationsUsage.map((iterationUsage) => iterationUsage.usage),
       answerGenerationUsage,
     ]);
+
+    // log cache hit rate so we can see prompt caching working in production
+    // ratio of 0 means no cache hit (cold first call or below provider threshold); a healthy steady-state should sit above 0.5
+    const cacheHitRate = totalUsage.promptTokens > 0 ? totalUsage.cachedPromptTokens / totalUsage.promptTokens : 0;
+    this.logger.log(
+      `Token usage: ${totalUsage.totalTokens} total (${totalUsage.promptTokens} prompt, ${totalUsage.completionTokens} completion, ${totalUsage.cachedPromptTokens} cached, ${(cacheHitRate * 100).toFixed(1)}% hit rate)`,
+    );
 
     return {
       answer,
@@ -558,6 +565,33 @@ Answer the question based on these findings:`,
     }
 
     return formatted;
+  }
+
+  // executes every tool call from one LLM iteration in parallel and returns the bundles in the LLM's original order
+  // Promise.all preserves array order even when individual promises resolve out of order, which is important so the LLM sees tool results in the order it requested them
+  async _executeToolCallsInParallel({
+    projectId,
+    toolCalls,
+    conversationId,
+  }: {
+    projectId: string;
+    toolCalls: LLMToolCall[];
+    conversationId: string | undefined;
+  }): Promise<AgentExecutedToolCallBundle[]> {
+    return Promise.all(
+      toolCalls.map(async (toolCall): Promise<AgentExecutedToolCallBundle> => {
+        this.logger.debug(`Calling tool: ${toolCall.name}(${JSON.stringify(toolCall.arguments)})`);
+
+        const result = await this._executeTool(projectId, toolCall.name, toolCall.arguments, conversationId);
+
+        return {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          toolArgs: toolCall.arguments,
+          result,
+        };
+      }),
+    );
   }
 
   /**

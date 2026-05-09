@@ -4,6 +4,7 @@ const ZERO_USAGE: AgentTokenUsage = {
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
+  cachedPromptTokens: 0,
 };
 
 // sums an arbitrary list of AgentTokenUsage entries; safe on an empty list (returns zeros)
@@ -14,6 +15,7 @@ export const sumAgentTokenUsage = (usages: AgentTokenUsage[]): AgentTokenUsage =
       promptTokens: accumulator.promptTokens + current.promptTokens,
       completionTokens: accumulator.completionTokens + current.completionTokens,
       totalTokens: accumulator.totalTokens + current.totalTokens,
+      cachedPromptTokens: accumulator.cachedPromptTokens + current.cachedPromptTokens,
     }),
     { ...ZERO_USAGE },
   );

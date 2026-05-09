@@ -47,11 +47,18 @@ export class AnthropicService {
     // if both are ever needed at once, the caller would need to drop the structured-output guarantee or build a tool that wraps everything
     const anthropicTools = structuredOutputTool ? [structuredOutputTool] : callerTools.length > 0 ? callerTools : undefined;
 
+    // mark the system prompt as a cache breakpoint so anthropic caches it (and the tools array, which sits before it in the prefix)
+    // cache write costs ~1.25x normal and read costs ~0.1x — a net win as soon as the same prefix is used twice within the 5min ttl
+    // when system prompt is below ~1024 tokens anthropic ignores the marker, so this is safe even for short prompts
+    const systemWithCacheControl: Anthropic.TextBlockParam[] | undefined = options.systemPrompt
+      ? [{ type: "text", text: options.systemPrompt, cache_control: { type: "ephemeral" } }]
+      : undefined;
+
     const response = await this.anthropic.messages.create({
       model: options.model,
       max_tokens: options.maxTokens ?? 4096,
       temperature: options.temperature ?? 0.1,
-      system: options.systemPrompt,
+      system: systemWithCacheControl,
       messages: anthropicMessages,
       tools: anthropicTools,
       // forcing tool_choice ensures Claude must call the structured-output tool — it cannot return free text
@@ -89,6 +96,8 @@ export class AnthropicService {
         promptTokens: response.usage.input_tokens,
         completionTokens: response.usage.output_tokens,
         totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+        // anthropic reports cache hits separately as cache_read_input_tokens; missing on responses that didn't hit the cache
+        cachedPromptTokens: response.usage.cache_read_input_tokens ?? 0,
       },
     };
   }
@@ -186,6 +195,8 @@ export class AnthropicService {
         promptTokens: response.usage.input_tokens,
         completionTokens: response.usage.output_tokens,
         totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+        // anthropic reports cache hits separately as cache_read_input_tokens; missing on responses that didn't hit the cache
+        cachedPromptTokens: response.usage.cache_read_input_tokens ?? 0,
       },
     };
   }

@@ -147,6 +147,8 @@ export class OpenAIService {
         promptTokens: response.usage?.prompt_tokens ?? 0,
         completionTokens: response.usage?.completion_tokens ?? 0,
         totalTokens: response.usage?.total_tokens ?? 0,
+        // openai exposes cached prefix tokens here; populated automatically when the prompt prefix matched a recent request (>=1024 tokens, ~5min ttl)
+        cachedPromptTokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       },
     };
   }
