@@ -91,7 +91,9 @@ export class AnthropicService {
     return {
       id: response.id,
       content: JSON.stringify(toolUseBlock.input),
-      finishReason: "stop",
+      // structured output is forced via tool_choice — "max_tokens" here means the tool's input json was truncated mid-generation, so JSON.parse will fail downstream
+      // surfacing it as "length" lets the agent service warn before the parse failure obscures the cause
+      finishReason: response.stop_reason === "max_tokens" ? "length" : "stop",
       usage: {
         promptTokens: response.usage.input_tokens,
         completionTokens: response.usage.output_tokens,
@@ -190,7 +192,13 @@ export class AnthropicService {
       id: response.id,
       content: textContent || null,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      finishReason: response.stop_reason === "tool_use" ? "tool_calls" : "stop",
+      finishReason:
+        response.stop_reason === "tool_use"
+          ? "tool_calls"
+          : // anthropic uses "max_tokens" for truncation; map to our "length" so the agent service can warn
+            response.stop_reason === "max_tokens"
+            ? "length"
+            : "stop",
       usage: {
         promptTokens: response.usage.input_tokens,
         completionTokens: response.usage.output_tokens,

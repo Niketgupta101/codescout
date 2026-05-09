@@ -72,4 +72,10 @@ export class EnvConfig {
   @IsOptional()
   @IsNumber()
   AGENT_TIMEOUT_MS?: number;
+
+  // max output tokens per LLM call (research iterations + answer generation)
+  // default 16384 is the safe ceiling across our providers; raise if logs show "response truncated" warnings
+  @IsOptional()
+  @IsNumber()
+  AGENT_MAX_OUTPUT_TOKENS?: number;
 }

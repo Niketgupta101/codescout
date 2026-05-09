@@ -142,7 +142,13 @@ export class OpenAIService {
       id: response.id,
       content: message?.content ?? null,
       toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
-      finishReason: choice?.finish_reason === "tool_calls" ? "tool_calls" : "stop",
+      finishReason:
+        choice?.finish_reason === "tool_calls"
+          ? "tool_calls"
+          : // openai returns "length" when max_tokens is hit; surface it so the agent service can warn about truncation
+            choice?.finish_reason === "length"
+            ? "length"
+            : "stop",
       usage: {
         promptTokens: response.usage?.prompt_tokens ?? 0,
         completionTokens: response.usage?.completion_tokens ?? 0,

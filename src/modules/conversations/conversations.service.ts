@@ -180,9 +180,14 @@ export class ConversationsService {
     const context: LLMMessage[] = [];
     const totalMessages = messages.length;
 
+    // keep tool_call payloads only for the most recent turn (1 user + 1 assistant = 2 db messages)
+    // older turns get reduced to plain assistant text — tool results carry whole file contents and bloat the prompt by 10-20x
+    // tradeoff: agent loses access to "what tools did I previously call" beyond the most recent turn; the prior answer text still summarizes findings
+    const RECENT_TURN_DB_MESSAGE_COUNT = 2;
+
     for (let i = 0; i < totalMessages; i++) {
       const msg = messages[i];
-      const isRecent = i >= totalMessages - 6; // last 3 turns (6 messages)
+      const isRecent = i >= totalMessages - RECENT_TURN_DB_MESSAGE_COUNT;
 
       if (!msg.assitant) {
         context.push({

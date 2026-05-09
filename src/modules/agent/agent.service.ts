@@ -39,6 +39,23 @@ export class AgentService {
     return requestTimeoutMs ?? this.envService.get("AGENT_TIMEOUT_MS") ?? 180_000;
   }
 
+  // resolves max output tokens per LLM call: env override > 16384 default
+  // 16384 is the safe ceiling across providers we support (sonnet 4.5 supports 64k but openai gpt-4o family caps at 16k)
+  // max_tokens is a cap not a charge, so bumping it has no cost — only api errors when the value exceeds the model's hard limit
+  _resolveMaxOutputTokens(): number {
+    return this.envService.get("AGENT_MAX_OUTPUT_TOKENS") ?? 16384;
+  }
+
+  // emits a warning when the LLM stopped because it hit max_tokens — that means the answer was clipped and the user got an incomplete response
+  // raise AGENT_MAX_OUTPUT_TOKENS in env vars to fix
+  _warnIfTruncated(stage: "research" | "answer-generation", finishReason: string, maxOutputTokens: number): void {
+    if (finishReason === "length") {
+      this.logger.warn(
+        `LLM ${stage} response truncated at ${maxOutputTokens} output tokens — raise AGENT_MAX_OUTPUT_TOKENS to fix`,
+      );
+    }
+  }
+
   /**
    * Execute agent query with tool calling loop
    */
@@ -51,6 +68,7 @@ export class AgentService {
     const startTime = Date.now();
     const maxIterations = request.maxIterations ?? 15;
     const timeoutMs = this._resolveTimeoutMs(request.timeoutMs);
+    const maxOutputTokens = this._resolveMaxOutputTokens();
 
     this.logger.log(`Agent query: "${request.query}" (${provider}/${model})`);
 
@@ -95,7 +113,10 @@ export class AgentService {
         messages,
         tools: this._getToolDefinitions(),
         temperature: 0.1,
+        maxTokens: maxOutputTokens,
       });
+
+      this._warnIfTruncated("research", response.finishReason, maxOutputTokens);
 
       // add assistant message to history
       messages.push({
@@ -206,6 +227,7 @@ export class AgentService {
     const startTime = Date.now();
     const maxIterations = request.maxIterations ?? 15;
     const timeoutMs = this._resolveTimeoutMs(request.timeoutMs);
+    const maxOutputTokens = this._resolveMaxOutputTokens();
 
     this.logger.log(
       `Agent query with context (${conversationContext.length} messages): "${request.query}" (${provider}/${model})`,
@@ -253,7 +275,10 @@ export class AgentService {
         messages,
         tools: this._getToolDefinitions(conversationId),
         temperature: 0.1,
+        maxTokens: maxOutputTokens,
       });
+
+      this._warnIfTruncated("research", response.finishReason, maxOutputTokens);
 
       // add assistant message to history
       messages.push({
@@ -455,6 +480,8 @@ export class AgentService {
       projectSummary: projectContext.projectSummary,
     });
 
+    const maxOutputTokens = this._resolveMaxOutputTokens();
+
     try {
       const response = await this.llmService.chatCompletion({
         provider,
@@ -475,6 +502,7 @@ Answer the question based on these findings:`,
           },
         ],
         temperature: 0.1,
+        maxTokens: maxOutputTokens,
         responseFormat: {
           type: "json_schema",
           json_schema: {
@@ -527,11 +555,15 @@ Answer the question based on these findings:`,
         },
       });
 
+      this._warnIfTruncated("answer-generation", response.finishReason, maxOutputTokens);
+
       if (!response.content) {
         throw new Error("No response from LLM");
       }
 
-      const parsedAnswer = JSON.parse(response.content) as AgentLLMAnswerToQuery;
+      // anthropic's tool_use input_schema is a hint, not strictly enforced — claude can return arrays as strings, drop fields, etc.
+      // validating + coercing here means a malformed shape produces a usable answer instead of crashing the whole agent run
+      const parsedAnswer = this._parseAndCoerceAgentLLMAnswer(response.content);
 
       return {
         formattedAnswer: this._formatAnswer(parsedAnswer),
@@ -541,6 +573,49 @@ Answer the question based on these findings:`,
       this.logger.error("Failed to generate answer", error);
       throw error;
     }
+  }
+
+  // parses the raw structured-output JSON and coerces each field to its expected shape
+  // logs a warning when coercion was needed so we can spot providers misbehaving without breaking the request
+  _parseAndCoerceAgentLLMAnswer(rawJsonString: string): AgentLLMAnswerToQuery {
+    const raw = JSON.parse(rawJsonString) as Record<string, unknown>;
+
+    const answer = typeof raw.answer === "string" ? raw.answer : "";
+
+    // details: must be string[]; coerce a single string to one-element array, anything else to empty
+    let details: string[];
+    if (Array.isArray(raw.details)) {
+      details = raw.details.filter((entry): entry is string => typeof entry === "string");
+    } else if (typeof raw.details === "string") {
+      this.logger.warn(`Structured output returned 'details' as string instead of string[]; wrapping`);
+      details = [raw.details];
+    } else {
+      if (raw.details != null) {
+        this.logger.warn(`Structured output returned 'details' as ${typeof raw.details}; defaulting to empty array`);
+      }
+      details = [];
+    }
+
+    // codeSnippets: must be {filePath, code}[]; drop entries that don't match
+    const codeSnippets = Array.isArray(raw.codeSnippets)
+      ? raw.codeSnippets.filter(
+          (entry): entry is { filePath: string; code: string } =>
+            entry != null &&
+            typeof entry === "object" &&
+            typeof (entry as Record<string, unknown>).filePath === "string" &&
+            typeof (entry as Record<string, unknown>).code === "string",
+        )
+      : [];
+
+    if (raw.codeSnippets != null && !Array.isArray(raw.codeSnippets)) {
+      this.logger.warn(`Structured output returned 'codeSnippets' as ${typeof raw.codeSnippets}; defaulting to empty`);
+    }
+
+    // boolean flags default to safe values when missing or wrong type
+    const showDetails = typeof raw.showDetails === "boolean" ? raw.showDetails : details.length > 0;
+    const showCode = typeof raw.showCode === "boolean" ? raw.showCode : false;
+
+    return { answer, details, codeSnippets, showDetails, showCode };
   }
 
   /**
