@@ -166,6 +166,9 @@ model Symbol {
   name       String
   type       SymbolType
   context    String?    @db.Text
+  // 1-indexed inclusive line range of the symbol within the source file; null for symbols without a known span (e.g. parent-class shortcut rows, markdown headings indexed before this field existed)
+  startLine  Int?
+  endLine    Int?
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
 

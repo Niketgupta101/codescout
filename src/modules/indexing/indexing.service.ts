@@ -543,6 +543,10 @@ export class IndexingService {
       return 0;
     }
 
+    // 1-indexed inclusive line range from the parser (ts-morph getLineAndColumnAtPos); used by callers to do precise read_file_range calls
+    const startLine = typeof metadata.startLine === "number" ? metadata.startLine : null;
+    const endLine = typeof metadata.endLine === "number" ? metadata.endLine : null;
+
     // create symbol
     await this.prisma.symbol.create({
       data: {
@@ -551,11 +555,14 @@ export class IndexingService {
         type: symbolType,
         name,
         context: filePath,
+        startLine,
+        endLine,
       },
     });
     count++;
 
     // for methods, also extract parent class
+    // the chunk metadata is the method's, so we don't know the class's range from here — leave it null and let searchSymbols dedup the duplicates from N methods
     const parentClass = typeof metadata.parentClass === "string" ? metadata.parentClass : undefined;
     if (chunkType === "method" && parentClass) {
       await this.prisma.symbol.create({

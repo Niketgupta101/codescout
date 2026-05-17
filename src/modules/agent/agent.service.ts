@@ -904,7 +904,7 @@ Answer the question based on these findings:`,
       {
         name: "search_symbols",
         description:
-          "Search for symbols (functions, classes, types, etc.) by name. Case-insensitive partial match. Returns symbol name, type, file path, and context. Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
+          "Search for symbols (functions, classes, types, etc.) by name. Case-insensitive partial match. Returns symbol name, type, file path, context, and (when available) the 1-indexed inclusive line range startLine/endLine. If startLine/endLine are present, prefer read_file_range with those numbers over read_file — it's much cheaper than reading the whole file. Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
         parameters: {
           name: {
             type: "string",

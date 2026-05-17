@@ -6,7 +6,7 @@ export type BuildAgentSystemPromptOptions = {
 
 const BASE_TOOL_DESCRIPTIONS = [
   "- list_files: list files filtered by a case-insensitive substring of the full path (e.g. 'order.service', 'modules/auth'). FAST PATH when the resource name is in the question.",
-  "- search_symbols: exact or partial name match for functions, classes, types, enums. FAST PATH when you have a likely symbol name.",
+  "- search_symbols: exact or partial name match for functions, classes, types, enums. FAST PATH when you have a likely symbol name. Returns startLine/endLine when known — use them with read_file_range for a targeted read instead of pulling the whole file.",
   "- search_code: regex grep over file content. Scope with pathPattern to limit to a subtree.",
   "- read_file: full file content (whole file if ≤1500 lines, else first 1500 with a truncation marker). REQUIRED before claiming anything about a file's behavior.",
   "- read_file_range: read a specific line range of a file (1-indexed, max 1500 lines per call). Prefer over read_file when you only need a known section of a large file.",
@@ -61,7 +61,7 @@ When the question names a resource, file, or symbol — this is the common case.
    - Symbol-like ("updateOrder function", "User class"): search_symbols({name: "updateOrder"}).
    - File-like ("the order service", "auth module"): list_files({pathPattern: "order.service"}) or list_files({pathPattern: "auth"}).
    - String-like ("where do we call sendEmail"): search_code({pattern: "sendEmail", pathPattern: "modules"}).
-2. Read the single most relevant file with read_file.
+2. If search_symbols returned a startLine/endLine, call read_file_range(filePath, startLine, endLine) to pull just that symbol's body. Otherwise read_file the matched file.
 3. Answer. Only follow into another file if the first one delegates to it AND the question requires that detail.
 
 Example:
