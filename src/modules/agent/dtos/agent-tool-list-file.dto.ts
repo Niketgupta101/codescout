@@ -4,5 +4,5 @@ import { IsStringLc } from "src/plugins/locale/class-validator/typechecker-lc.de
 export class AgentToolListFileDto {
   @IsOptionalLc()
   @IsStringLc()
-  regex?: string;
+  pathPattern?: string;
 }

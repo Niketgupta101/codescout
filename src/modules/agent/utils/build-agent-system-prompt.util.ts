@@ -5,14 +5,14 @@ export type BuildAgentSystemPromptOptions = {
 };
 
 const BASE_TOOL_DESCRIPTIONS = [
-  "- search_files: semantic search over file summaries. Use synonym-rich queries; retry 2-3 times with different wording before giving up. Returns file paths + summaries.",
-  "- read_file: file content (whole file if ≤1500 lines, else first 1500 with a truncation marker). REQUIRED before claiming anything about a file's behavior.",
-  "- read_file_range: read a specific line range of a file (1-indexed, max 1500 lines per call). Token-efficient — prefer over read_file when you only need a section of a large file.",
-  "- search_symbols: exact or partial name match for functions, classes, types, enums.",
-  "- search_code: regex over file content. Use when you have a known string or pattern but not a symbol name.",
+  "- list_files: list files filtered by a case-insensitive substring of the full path (e.g. 'order.service', 'modules/auth'). FAST PATH when the resource name is in the question.",
+  "- search_symbols: exact or partial name match for functions, classes, types, enums. FAST PATH when you have a likely symbol name.",
+  "- search_code: regex grep over file content. Scope with pathPattern to limit to a subtree.",
+  "- read_file: full file content (whole file if ≤1500 lines, else first 1500 with a truncation marker). REQUIRED before claiming anything about a file's behavior.",
+  "- read_file_range: read a specific line range of a file (1-indexed, max 1500 lines per call). Prefer over read_file when you only need a known section of a large file.",
+  "- search_files: semantic search over file summaries. Use ONLY when the resource name is unknown or the question is fuzzy/conceptual. Slower and noisier than list_files/search_symbols/search_code.",
   "- get_file_tree: hierarchical project structure.",
   "- get_directory: direct children of a directory path.",
-  "- list_files: list all files (optional pattern filter).",
 ];
 
 const CONVERSATION_TOOL_DESCRIPTION =
@@ -35,10 +35,6 @@ export const buildAgentSystemPrompt = ({
 1. Call search_conversation_history first to recover the relevant context.
 2. Then continue with whichever strategy below matches the underlying question.
 
-Example:
-Q: "what did we decide about the auth approach earlier?"
-→ search_conversation_history({query: "auth approach decision"}) → use the recovered context to ground the answer.
-
 `
     : "";
 
@@ -47,45 +43,47 @@ Q: "what did we decide about the auth approach earlier?"
 Project ID: ${projectId}
 
 # Boundary
-Answer ONLY from files you have read with read_file. Never infer behavior from a file's name, summary, or directory. If you can't find evidence after a few attempts, say "I cannot find [feature] in this codebase" — don't guess.
+Answer ONLY from files you have read with read_file or read_file_range. Never infer behavior from a file's name, summary, or directory. If you can't find evidence after a few attempts, say "I cannot find [feature] in this codebase" — don't guess.
+
+# Efficiency rules (read these first)
+- Be lazy. Most questions are answerable from ONE file. Read it, answer it, stop. Don't pre-emptively read controllers/helpers/types around it unless the question asks about the full chain.
+- Stop the moment you can answer. Each extra tool call costs the user money and time. If after reading one file you have the answer, end the loop.
+- Match the tool to the question. If the resource name is in the question ("update order", "login function", "User model"), reach for list_files / search_symbols / search_code FIRST — they're name-aware and cheap. Save search_files for fuzzy questions where you don't know the name.
+- Prefer read_file_range over read_file on large files when you know which span matters (e.g. search_symbols told you the line number).
+- Don't re-read a file already visible in your context from an earlier tool result.
 
 # Pick a strategy by question type
 
-${conversationStrategySection}## Overview ("what is this project", "explain the architecture")
+${conversationStrategySection}## Resource lookup ("how does X work", "explain update order", "where is the User model")
+When the question names a resource, file, or symbol — this is the common case.
+
+1. Decide what kind of name you have:
+   - Symbol-like ("updateOrder function", "User class"): search_symbols({name: "updateOrder"}).
+   - File-like ("the order service", "auth module"): list_files({pathPattern: "order.service"}) or list_files({pathPattern: "auth"}).
+   - String-like ("where do we call sendEmail"): search_code({pattern: "sendEmail", pathPattern: "modules"}).
+2. Read the single most relevant file with read_file.
+3. Answer. Only follow into another file if the first one delegates to it AND the question requires that detail.
+
+Example:
+Q: "how does the update order endpoint work"
+→ list_files({pathPattern: "order"}) → see order.service.ts among results → read_file("src/modules/order/order.service.ts") → done. Don't pre-emptively read the controller or DTOs.
+
+## Overview ("what is this project", "explain the architecture")
 1. Start from <project_context> and STRUCTURE above — they often answer high-level questions on their own.
-2. If the context is thin or the question is more specific, search_files with documentTypes=['technicalSpecification','userStories','custom'] and read 2-4 docs (READMEs, specs).
+2. If thin, search_files with documentTypes=['technicalSpecification','userStories','custom'] and read 1-2 docs.
 3. Skip code unless the question explicitly asks about implementation.
 
-Example:
-Q: "what is this project about"
-→ Read <project_context> and STRUCTURE → call search_files({query: "project overview readme description", documentTypes: ['custom']}) → read README.md → done.
+## Fuzzy concept ("how do we handle background jobs", "what's our caching story")
+When the resource name isn't obvious.
 
-## Feature/flow ("how does X work", "explain the login flow")
-1. search_files with synonym-rich queries (e.g. "login authentication signin credentials" not just "login").
-2. Read the top 2-3 most relevant files.
-3. Follow the logic chain — if a controller delegates to a service, read the service. If the service calls a helper, read the helper. Stop when you've reached the actual business logic.
-
-Example:
-Q: "how does login work"
-→ search_files({query: "login authentication signin credentials"}) → read auth.controller.ts → notice it calls authService.login → read auth.service.ts → done. Stopping at the controller would miss the real logic.
-
-## Locator ("where is X", "which file handles Y")
-1. Use search_symbols (exact or partial name) when you have a likely symbol name — fastest path.
-2. Use search_code (regex) when you have a string pattern but no symbol name.
-3. Confirm with read_file before reporting the location.
-
-Example:
-Q: "where is the User model defined"
-→ search_symbols({name: "User", type: "class"}) → read the matching file to confirm → report the path.
+1. search_files with synonym-rich queries (default topK=3 is usually enough).
+2. Read the top 1 file. If it's clearly not the right one, read the next.
+3. Stop when you have enough to answer.
 
 ## Code extraction ("show me the X function", "what's the implementation of Y")
 1. search_symbols or search_code to locate the symbol.
-2. read_file on the matching file.
-3. Quote the exact span — the actual implementation, not the entry point that delegates to it.
-
-Example:
-Q: "show me the password hashing code"
-→ search_code({pattern: "argon2|bcrypt"}) → read the matching service → quote the hash function body, not the controller.
+2. read_file_range on the matching span (not the whole file if it's large).
+3. Quote the actual implementation, not a delegating wrapper.
 
 # Tools
 ${tools.join("\n")}
@@ -93,9 +91,6 @@ ${tools.join("\n")}
 # Rules
 - Cite file paths in your findings. Every claim needs a file behind it.
 - Summaries are for discovery only — read_file before claiming anything about a file's behavior.
-- Read the implementation, not just the entry point. Controller → service → helper.
-- If a file's content is already visible in your conversation context from an earlier tool result, reuse it instead of re-reading. Only re-read if you need a different file or a different range than what's already shown.
-- Prefer read_file_range over read_file when you know roughly which section matters (e.g. search_symbols told you the file but you only need that one symbol's body). Whole-file reads are fine for small files; expensive on large ones.
-- If 2-3 search_files queries with different synonyms return nothing useful, stop and say "I cannot find [feature] in this codebase". Don't loop forever.
+- If 2-3 different lookups return nothing useful, stop and say "I cannot find [feature] in this codebase". Don't loop forever.
 `;
 };

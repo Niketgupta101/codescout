@@ -9,4 +9,8 @@ export class AgentToolSearchCodeDto {
   @IsOptionalLc()
   @IsEnumLc(CodeFileLanguage)
   language?: CodeFileLanguage;
+
+  @IsOptionalLc()
+  @IsStringLc()
+  pathPattern?: string;
 }

@@ -25,13 +25,12 @@ export class AgentToolsService {
     readonly openaiService: OpenAIService,
   ) {}
 
-  async listFiles(projectId: string, { regex }: AgentToolListFileDto): Promise<ToolResult<FileInfo[]>> {
+  async listFiles(projectId: string, { pathPattern }: AgentToolListFileDto): Promise<ToolResult<FileInfo[]>> {
     try {
-      this.logger.debug(`listFiles(regex=${regex ?? ""})`);
+      this.logger.debug(`listFiles(pathPattern=${pathPattern ?? ""})`);
 
-      // strip glob wildcards — prisma's `contains` is a substring match, not a regex/glob, so wildcards aren't meaningful
-      // accept the param name "regex" for backward compatibility but treat it as a substring filter on fullPath
-      const substring = regex?.replace(/\*/g, "").trim();
+      // case-insensitive substring match on fullPath; `*` is stripped so callers passing glob-like patterns still work
+      const substring = pathPattern?.replace(/\*/g, "").trim();
 
       const files = await this.prisma.codeFile.findMany({
         where: {
@@ -255,15 +254,26 @@ export class AgentToolsService {
 
   async searchCode(
     projectId: string,
-    { pattern, language }: AgentToolSearchCodeDto,
+    { pattern, language, pathPattern }: AgentToolSearchCodeDto,
   ): Promise<ToolResult<AgentToolCodeMatch[]>> {
     try {
-      this.logger.debug(`searchCode(pattern=${pattern}, language=${language ?? ""})`);
+      this.logger.debug(`searchCode(pattern=${pattern}, language=${language ?? ""}, pathPattern=${pathPattern ?? ""})`);
+
+      // strip glob-style wildcards from the path filter — fullPath uses a substring match, so wildcards aren't meaningful
+      const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
       const files = await this.prisma.codeFile.findMany({
         where: {
           projectId,
           language,
+          ...(pathSubstring
+            ? {
+                fullPath: {
+                  contains: pathSubstring,
+                  mode: "insensitive",
+                },
+              }
+            : {}),
         },
       });
 
@@ -421,7 +431,7 @@ export class AgentToolsService {
    * Tool 8: Search files by semantic similarity
    * Uses vector search on file summaries to find relevant files
    */
-  async searchFiles(projectId: string, query: string, documentTypes?: string[], topK = 10): Promise<ToolResult> {
+  async searchFiles(projectId: string, query: string, documentTypes?: string[], topK = 3): Promise<ToolResult> {
     try {
       this.logger.debug(`searchFiles(query=${query}, types=${(documentTypes ?? []).join(",")}, topK=${topK})`);
 

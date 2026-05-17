@@ -22,6 +22,14 @@ import { buildAgentSystemPrompt } from "./utils/build-agent-system-prompt.util";
 import { buildAnswerGenerationPrompt } from "./utils/build-answer-generation-prompt.util";
 import { sumAgentTokenUsage } from "./utils/sum-agent-token-usage.util";
 
+// placeholder usage record for runs that skip the post-research analyst LLM call
+const ZERO_TOKEN_USAGE: AgentTokenUsage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  cachedPromptTokens: 0,
+};
+
 @Injectable()
 export class AgentService {
   readonly logger = new Logger(AgentService.name);
@@ -186,23 +194,18 @@ export class AgentService {
         this.logger.log(
           `Agent research complete: ${iterations} iterations, ${toolCalls.length} tool calls, ${durationMs}ms`,
         );
-        this.logger.log(`Generating final answer from research findings...`);
 
-        const answerGenerationResult = await this._generateAnswer({
+        return this._finalizeAgentRun({
           query: request.query,
-          agentFindings: response.content,
+          researchContent: response.content,
+          skipAnswerFormatting: request.skipAnswerFormatting ?? false,
           projectContext,
           provider,
           model,
-        });
-
-        return this._buildAgentResponse({
-          answer: answerGenerationResult.formattedAnswer,
           toolCalls,
           iterations,
           durationMs,
           iterationsUsage,
-          answerGenerationUsage: answerGenerationResult.usage,
         });
       }
 
@@ -348,23 +351,18 @@ export class AgentService {
         this.logger.log(
           `Agent research complete: ${iterations} iterations, ${toolCalls.length} tool calls, ${durationMs}ms`,
         );
-        this.logger.log(`Generating final answer from research findings...`);
 
-        const answerGenerationResult = await this._generateAnswer({
+        return this._finalizeAgentRun({
           query: request.query,
-          agentFindings: response.content,
+          researchContent: response.content,
+          skipAnswerFormatting: request.skipAnswerFormatting ?? false,
           projectContext,
           provider,
           model,
-        });
-
-        return this._buildAgentResponse({
-          answer: answerGenerationResult.formattedAnswer,
           toolCalls,
           iterations,
           durationMs,
           iterationsUsage,
-          answerGenerationUsage: answerGenerationResult.usage,
         });
       }
 
@@ -420,6 +418,64 @@ export class AgentService {
 
   // assembles the public AgentResponse and computes totalUsage from the loop's iterations + the answer-generation call
   // separated so both query() and queryWithContext() return the same shape with no duplicated math
+  // decides whether to run the post-research formatter or return raw findings directly
+  // raw-findings mode exists for agentic callers (MCP) where the calling LLM will reformat anyway — running _generateAnswer for them duplicates work
+  async _finalizeAgentRun({
+    query,
+    researchContent,
+    skipAnswerFormatting,
+    projectContext,
+    provider,
+    model,
+    toolCalls,
+    iterations,
+    durationMs,
+    iterationsUsage,
+  }: {
+    query: string;
+    researchContent: string;
+    skipAnswerFormatting: boolean;
+    projectContext: AgentFormatProjectContextOptions;
+    provider: LLMProvider;
+    model: string;
+    toolCalls: AgentResponse["toolCalls"];
+    iterations: number;
+    durationMs: number;
+    iterationsUsage: AgentIterationUsage[];
+  }): Promise<AgentResponse> {
+    if (skipAnswerFormatting) {
+      this.logger.log(`Skipping _generateAnswer (skipAnswerFormatting=true) — returning raw research findings`);
+
+      return this._buildAgentResponse({
+        answer: researchContent,
+        toolCalls,
+        iterations,
+        durationMs,
+        iterationsUsage,
+        answerGenerationUsage: ZERO_TOKEN_USAGE,
+      });
+    }
+
+    this.logger.log(`Generating final answer from research findings...`);
+
+    const answerGenerationResult = await this._generateAnswer({
+      query,
+      agentFindings: researchContent,
+      projectContext,
+      provider,
+      model,
+    });
+
+    return this._buildAgentResponse({
+      answer: answerGenerationResult.formattedAnswer,
+      toolCalls,
+      iterations,
+      durationMs,
+      iterationsUsage,
+      answerGenerationUsage: answerGenerationResult.usage,
+    });
+  }
+
   _buildAgentResponse({
     answer,
     toolCalls,
@@ -680,7 +736,7 @@ Answer the question based on these findings:`,
   ): Promise<unknown> {
     switch (toolName) {
       case "list_files":
-        return this.tools.listFiles(projectId, { regex: args.pattern as string | undefined });
+        return this.tools.listFiles(projectId, { pathPattern: args.pathPattern as string | undefined });
 
       case "read_file":
         return this.tools.readFile(projectId, args.filePath as string);
@@ -704,6 +760,7 @@ Answer the question based on these findings:`,
         return this.tools.searchCode(projectId, {
           pattern: args.pattern as string,
           language: args.language as CodeFileLanguage,
+          pathPattern: args.pathPattern as string | undefined,
         });
 
       case "get_file_tree":
@@ -759,11 +816,13 @@ Answer the question based on these findings:`,
     const baseTools: LLMTool[] = [
       {
         name: "list_files",
-        description: 'List all files in the project. Optional pattern filter (e.g., "*.ts", "src/").',
+        description:
+          "List files in the project, optionally filtered by a case-insensitive substring match on the full path. Use to locate files when the resource name is in the question (e.g. pathPattern='order' to find every order-related file). Fast path before reaching for search_files.",
         parameters: {
-          pattern: {
+          pathPattern: {
             type: "string",
-            description: "Optional pattern to filter files",
+            description:
+              "Optional case-insensitive substring matched against the full file path (e.g. 'order.service', 'modules/auth', '.spec.ts'). `*` wildcards are accepted but treated as substring matches.",
           },
         },
       },
@@ -818,15 +877,20 @@ Answer the question based on these findings:`,
       {
         name: "search_code",
         description:
-          "Search for code using regex pattern. Returns matching files with line numbers and excerpts. Use for finding usage patterns, specific strings, or code structures.",
+          "Regex grep over file content. Returns matching files with line numbers and excerpts. Scope with pathPattern (e.g. pathPattern='modules/order') to grep only inside a subtree — much faster and cheaper than grepping the whole repo.",
         parameters: {
           pattern: {
             type: "string",
-            description: "Regex pattern to search for",
+            description: "Regex pattern to search for in file content",
           },
           language: {
             type: "string",
             description: "Optional language filter (typescript, javascript, markdown, etc.)",
+          },
+          pathPattern: {
+            type: "string",
+            description:
+              "Optional case-insensitive substring matched against the full file path to limit the grep scope (e.g. 'modules/order', 'src/auth').",
           },
         },
         required: ["pattern"],
@@ -866,7 +930,7 @@ Answer the question based on these findings:`,
           },
           topK: {
             type: "number",
-            description: "Number of results to return (default: 10)",
+            description: "Number of results to return (default: 3). Raise to 5-8 only when the first batch is clearly insufficient.",
           },
         },
         required: ["query"],
