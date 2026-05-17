@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node -r ts-node/register
+#!/usr/bin/env -S TS_NODE_PROJECT=./scripts/plugins/ts-node-tsconfig.json TS_NODE_FILES=true node -r ts-node/register -r tsconfig-paths/register
 
 import { NestFactory } from "@nestjs/core";
 import { Logger } from "@nestjs/common";

@@ -56,7 +56,11 @@ export class AgentService {
 
   // emits a warning when the LLM stopped because it hit max_tokens — that means the answer was clipped and the user got an incomplete response
   // raise AGENT_MAX_OUTPUT_TOKENS in env vars to fix
-  _warnIfTruncated(stage: "research" | "answer-generation", finishReason: string, maxOutputTokens: number): void {
+  _warnIfTruncated(
+    stage: "research" | "answer-generation" | "forced-final-synthesis",
+    finishReason: string,
+    maxOutputTokens: number,
+  ): void {
     if (finishReason === "length") {
       this.logger.warn(
         `LLM ${stage} response truncated at ${maxOutputTokens} output tokens — raise AGENT_MAX_OUTPUT_TOKENS to fix`,
@@ -213,7 +217,21 @@ export class AgentService {
       throw new Error("LLM returned no content or tool calls");
     }
 
-    throw new Error(`Max iterations (${maxIterations}) reached`);
+    // budget exhausted before the LLM chose to answer; force a final synthesis with tools disabled rather than throwing on the user
+    return this._forceFinalAnswerAfterBudgetExhaustion({
+      query: request.query,
+      messages,
+      iterations,
+      iterationsUsage,
+      toolCalls,
+      startTime,
+      maxOutputTokens,
+      maxIterations,
+      skipAnswerFormatting: request.skipAnswerFormatting ?? false,
+      projectContext,
+      provider,
+      model,
+    });
   }
 
   /**
@@ -370,7 +388,103 @@ export class AgentService {
       throw new Error("LLM returned no content or tool calls");
     }
 
-    throw new Error(`Max iterations (${maxIterations}) reached`);
+    return this._forceFinalAnswerAfterBudgetExhaustion({
+      query: request.query,
+      messages,
+      iterations,
+      iterationsUsage,
+      toolCalls,
+      startTime,
+      maxOutputTokens,
+      maxIterations,
+      skipAnswerFormatting: request.skipAnswerFormatting ?? false,
+      projectContext,
+      provider,
+      model,
+    });
+  }
+
+  // called when the tool-call loop runs out of iterations without the LLM voluntarily ending — sends one more LLM call with no tools so the model has to synthesize a final answer from the findings it already has
+  async _forceFinalAnswerAfterBudgetExhaustion({
+    query,
+    messages,
+    iterations,
+    iterationsUsage,
+    toolCalls,
+    startTime,
+    maxOutputTokens,
+    maxIterations,
+    skipAnswerFormatting,
+    projectContext,
+    provider,
+    model,
+  }: {
+    query: string;
+    messages: LLMMessage[];
+    iterations: number;
+    iterationsUsage: AgentIterationUsage[];
+    toolCalls: AgentResponse["toolCalls"];
+    startTime: number;
+    maxOutputTokens: number;
+    maxIterations: number;
+    skipAnswerFormatting: boolean;
+    projectContext: AgentFormatProjectContextOptions;
+    provider: LLMProvider;
+    model: string;
+  }): Promise<AgentResponse> {
+    this.logger.warn(
+      `Max iterations (${maxIterations}) reached — forcing final synthesis with tools disabled rather than throwing`,
+    );
+
+    // append a user-side instruction to synthesize from what's already been gathered; calling the LLM without `tools` removes the option of issuing more tool calls
+    const messagesForFinalCall: LLMMessage[] = [
+      ...messages,
+      {
+        role: "user",
+        content:
+          `You have reached the maximum tool-call budget (${maxIterations} iterations) for this question. ` +
+          `Synthesize a final answer to the original user question using only the findings already gathered above. ` +
+          `Do not call any more tools. If your findings are incomplete, state explicitly what you confirmed and what's still uncertain.`,
+      },
+    ];
+
+    const finalResponse = await this.llmService.chatCompletion({
+      provider,
+      model,
+      messages: messagesForFinalCall,
+      // intentionally omit `tools` so the model is forced to emit text
+      temperature: 0.1,
+      maxTokens: maxOutputTokens,
+    });
+
+    this._warnIfTruncated("forced-final-synthesis", finalResponse.finishReason, maxOutputTokens);
+
+    iterationsUsage.push({
+      iteration: iterations + 1,
+      toolCallIds: [],
+      usage: finalResponse.usage,
+    });
+
+    const durationMs = Date.now() - startTime;
+
+    this.logger.log(
+      `Agent forced-finalize complete: ${iterations + 1} iterations, ${toolCalls.length} tool calls, ${durationMs}ms`,
+    );
+
+    return this._finalizeAgentRun({
+      query,
+      researchContent:
+        finalResponse.content ??
+        `[Agent reached the ${maxIterations}-iteration budget without producing a final synthesis.]`,
+      skipAnswerFormatting,
+      projectContext,
+      provider,
+      model,
+      toolCalls,
+      iterations: iterations + 1,
+      durationMs,
+      iterationsUsage,
+    });
   }
 
   _buildSystemPrompt({
@@ -860,7 +974,8 @@ Answer the question based on these findings:`,
       {
         name: "list_files",
         description:
-          "List files in the project, optionally filtered by a case-insensitive substring match on the full path. Use to locate files when the resource name is in the question (e.g. pathPattern='order' to find every order-related file). Fast path before reaching for search_files.",
+          "List files in the project, optionally filtered by a case-insensitive substring match on the full path. Use to locate files when the resource name is in the question (e.g. pathPattern='order' to find every order-related file). " +
+          "Note: a project STRUCTURE outline is already provided in the system prompt — check that first; only call list_files when you need a flat file list or a path-pattern filter the outline doesn't give you.",
         parameters: {
           pathPattern: {
             type: "string",
@@ -872,7 +987,10 @@ Answer the question based on these findings:`,
       {
         name: "read_file",
         description:
-          "Read a file's content. Returns the whole file when it fits within 1500 lines; otherwise returns the first 1500 lines with a truncation marker — call read_file_range for specific spans. Prefer read_file_range when you only need a known section of a large file.",
+          "Read the full content of a file. Returns the entire file regardless of size. " +
+          "USE FOR small files where you want everything: controllers, DTOs, type definitions, READMEs, module files (typically <500 lines). " +
+          "DO NOT USE FOR large service/router/aggregator files (e.g. order.service.ts at 3000 lines) when you only want one function — that's wasteful. " +
+          "For those, pair search_symbols with read_file_range instead.",
         parameters: {
           filePath: {
             type: "string",
@@ -884,7 +1002,8 @@ Answer the question based on these findings:`,
       {
         name: "read_file_range",
         description:
-          "Read a specific line range of a file. Token-efficient — use when you only need one function or section of a large file (e.g. when search_symbols told you which file but a small portion is enough). Range size is capped at 1500 lines per call.",
+          "Read a specific line range of a file. Returns only the requested lines (1-indexed, inclusive). Range size capped at 1500 lines per call. " +
+          "PRIMARY TOOL for large files when paired with search_symbols: if search_symbols returned startLine/endLine for the symbol you want, call read_file_range with those numbers directly — DO NOT call read_file first.",
         parameters: {
           filePath: {
             type: "string",
@@ -904,7 +1023,10 @@ Answer the question based on these findings:`,
       {
         name: "search_symbols",
         description:
-          "Search for symbols (functions, classes, types, etc.) by name. Case-insensitive partial match. Returns symbol name, type, file path, context, and (when available) the 1-indexed inclusive line range startLine/endLine. If startLine/endLine are present, prefer read_file_range with those numbers over read_file — it's much cheaper than reading the whole file. Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
+          "PRIMARY ENTRY POINT for any named symbol (function, class, method, type, enum). " +
+          "Case-insensitive partial match on the symbol name. Returns name + type + file path + 1-indexed inclusive line range (startLine/endLine, when known). " +
+          "The returned line range is meant to be passed straight to read_file_range — that's the canonical pair (search_symbols → read_file_range). " +
+          "Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
         parameters: {
           name: {
             type: "string",
@@ -925,7 +1047,9 @@ Answer the question based on these findings:`,
       {
         name: "search_code",
         description:
-          "Regex grep over file content. Returns matching files with line numbers and excerpts. Scope with pathPattern (e.g. pathPattern='modules/order') to grep only inside a subtree — much faster and cheaper than grepping the whole repo.",
+          "Regex grep over file content. Returns matching files with line numbers and excerpts. " +
+          "Use when you have a known string/pattern (an API call, a constant, a string literal) but NO symbol name. " +
+          "If you have a symbol name, prefer search_symbols. Scope with pathPattern (e.g. pathPattern='modules/order') to grep only inside a subtree.",
         parameters: {
           pattern: {
             type: "string",
@@ -946,7 +1070,8 @@ Answer the question based on these findings:`,
       {
         name: "get_file_tree",
         description:
-          "Get the hierarchical folder/file structure of the project. Useful for understanding project organization.",
+          "Get the hierarchical folder/file structure of the project. " +
+          "AVOID calling this redundantly: a STRUCTURE outline is already in the system prompt's project context block — check there first. Only call this when STRUCTURE is empty or you need a depth the outline doesn't show.",
         parameters: {},
       },
       {

@@ -20,10 +20,9 @@ export class AgentMcp {
   @Tool({
     name: "codeFileSearch",
     description:
-      "PREFERRED entry point for code questions when you can drive your own search → read → synthesize loop. " +
-      "Finds files by semantic similarity to a natural-language query (over file summaries, not raw content). " +
-      "Returns ranked file paths with summaries. Pair with codeFileRead, codeFileReadRange, and symbolSearch to investigate further. " +
-      "Lower latency, lower cost, and more flexibility than chatMessageCreate for agentic clients.",
+      "Semantic search over file summaries (NOT raw content). Use only when the question is fuzzy/conceptual and you don't already know a symbol name or a path hint. " +
+      "If you know a symbol name, use symbolSearch instead. If you know a path pattern, use list_files-style filters. " +
+      "Pairs with codeFileRead, codeFileReadRange, and symbolSearch — load those tools together for code questions.",
     parameters: CodeFileSearchSchema,
   })
   async codeFileSearch(codeFileSearchInput: CodeFileSearchInput, _context: Context, request?: McpToolRequest) {
@@ -45,9 +44,10 @@ export class AgentMcp {
   @Tool({
     name: "codeFileRead",
     description:
-      "Read the full raw content of a single file by its path (whole file if ≤1500 lines, else first 1500 with a truncation marker). " +
-      "When a file is truncated, follow up with codeFileReadRange to fetch any remaining span. " +
-      "Use after codeFileSearch or symbolSearch when you need the actual implementation.",
+      "Read the FULL content of a single file (entire file regardless of size). " +
+      "Use for small files where you want everything: controllers, DTOs, type definitions, READMEs, module files (typically <500 lines). " +
+      "DO NOT USE FOR large service/router files when you only want one function — that's wasteful. For those, pair symbolSearch with codeFileReadRange instead. " +
+      "If codeFileReadRange isn't in your tool list yet, search for it now — it's the partner tool for this one.",
     parameters: CodeFileReadSchema,
   })
   async codeFileRead(codeFileReadInput: CodeFileReadInput, _context: Context, request?: McpToolRequest) {
@@ -64,9 +64,9 @@ export class AgentMcp {
   @Tool({
     name: "codeFileReadRange",
     description:
-      "Read a specific line range of a file (1-indexed, max 1500 lines per call). " +
-      "Token-efficient — prefer this over codeFileRead when you only need one function or section of a large file, " +
-      "or when codeFileRead returned a truncated result and you need lines beyond 1500.",
+      "Read a specific line range from a file (1-indexed, inclusive). Returns only the requested lines, capped at 1500 lines per call. " +
+      "PRIMARY TOOL for large files when paired with symbolSearch: if symbolSearch returned startLine/endLine for the symbol you want, call codeFileReadRange directly with those numbers — DO NOT call codeFileRead first on a large file. " +
+      "Partner tools: symbolSearch (to get line ranges), codeFileRead (for whole files when small).",
     parameters: CodeFileReadRangeSchema,
   })
   async codeFileReadRange(
@@ -92,9 +92,11 @@ export class AgentMcp {
   @Tool({
     name: "symbolSearch",
     description:
-      "Find symbols (classes, functions, types, etc.) by name across an indexed project. " +
-      "Returns symbol name, kind, and the file it lives in. Scope with pathPattern (e.g. 'order.service') when the same symbol name exists in many files. " +
-      "Fastest path when you already know a symbol name; for free-form discovery use codeFileSearch.",
+      "PRIMARY ENTRY POINT for any named symbol (function, class, method, type, enum). " +
+      "Case-insensitive partial match. Returns name + type + file path + 1-indexed inclusive line range (startLine/endLine, when known). " +
+      "The returned line range is meant to be passed straight to codeFileReadRange — that's the canonical pair (symbolSearch → codeFileReadRange). " +
+      "Scope with pathPattern (e.g. 'order.service') when the same symbol name exists in many files. " +
+      "If codeFileReadRange isn't in your tool list yet, search for it now — it's the partner tool for this one.",
     parameters: SymbolSearchSchema,
   })
   async symbolSearch(symbolSearchInput: SymbolSearchInput, _context: Context, request?: McpToolRequest) {

@@ -93,28 +93,17 @@ export class AgentToolsService {
         };
       }
 
-      const allLines = file.rawContent.split("\n");
-      const totalLines = allLines.length;
-      const truncated = totalLines > MAX_READ_FILE_LINES;
-
-      // emit either the whole file or just the first MAX_READ_FILE_LINES lines, with an explicit marker so the agent knows to call read_file_range for more
-      const returnedLines = truncated ? allLines.slice(0, MAX_READ_FILE_LINES) : allLines;
-      let content = returnedLines.join("\n");
-
-      if (truncated) {
-        content += `\n\n[file truncated at line ${MAX_READ_FILE_LINES} of ${totalLines} — call read_file_range(filePath, startLine, endLine) to fetch a specific span]`;
-      }
+      // read_file returns the full file always; callers are expected to pick the right tool upfront — read_file for small files (DTOs, types, controllers), search_symbols + read_file_range for large ones (services, routers)
+      const totalLines = file.rawContent.split("\n").length;
 
       return {
         success: true,
         data: {
           path: file.fullPath,
           language: file.language,
-          content,
+          content: file.rawContent,
           metadata: file.metadata,
           totalLines,
-          returnedLineRange: { start: 1, end: returnedLines.length },
-          truncated,
         },
       };
     } catch (error) {
@@ -192,8 +181,6 @@ export class AgentToolsService {
           content,
           metadata: file.metadata,
           totalLines,
-          returnedLineRange: { start: startLine, end: cappedEnd },
-          truncated,
         },
       };
     } catch (error) {
