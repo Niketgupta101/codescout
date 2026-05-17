@@ -709,20 +709,62 @@ Answer the question based on these findings:`,
     toolCalls: LLMToolCall[];
     conversationId: string | undefined;
   }): Promise<AgentExecutedToolCallBundle[]> {
-    return Promise.all(
-      toolCalls.map(async (toolCall): Promise<AgentExecutedToolCallBundle> => {
-        this.logger.debug(`Calling tool: ${toolCall.name}(${JSON.stringify(toolCall.arguments)})`);
+    // dedup identical (toolName + args) calls within a single iteration
+    // the LLM sometimes issues N parallel reads of the same file when N symbols live there; without dedup the
+    // file content lands in conversation N times and compounds across iterations
+    const dedupKeyByIndex = toolCalls.map((toolCall) => `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`);
 
-        const result = await this._executeTool(projectId, toolCall.name, toolCall.arguments, conversationId);
+    const firstIndexByKey = new Map<string, number>();
+    dedupKeyByIndex.forEach((key, idx) => {
+      if (!firstIndexByKey.has(key)) {
+        firstIndexByKey.set(key, idx);
+      }
+    });
+
+    // execute one call per unique key
+    const uniqueIndices = [...firstIndexByKey.values()];
+    const uniqueResults = await Promise.all(
+      uniqueIndices.map(async (idx) => {
+        const toolCall = toolCalls[idx];
+        this.logger.debug(`Calling tool: ${toolCall.name}(${JSON.stringify(toolCall.arguments)})`);
+        return {
+          idx,
+          result: await this._executeTool(projectId, toolCall.name, toolCall.arguments, conversationId),
+        };
+      }),
+    );
+
+    const resultByIndex = new Map<number, unknown>();
+    uniqueResults.forEach(({ idx, result }) => resultByIndex.set(idx, result));
+
+    // build bundles in original order so they line up with the LLM's tool_calls; duplicates get a stub pointing at the canonical call_id
+    return toolCalls.map((toolCall, idx): AgentExecutedToolCallBundle => {
+      const key = dedupKeyByIndex[idx];
+      const firstIdx = firstIndexByKey.get(key)!;
+      const isDuplicate = firstIdx !== idx;
+
+      if (isDuplicate) {
+        const canonicalCallId = toolCalls[firstIdx].id;
+        this.logger.debug(`Deduplicated tool call ${toolCall.id} (same args as ${canonicalCallId}); returning stub`);
 
         return {
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           toolArgs: toolCall.arguments,
-          result,
+          result: {
+            _duplicateOf: canonicalCallId,
+            _hint: `this call had identical args to ${canonicalCallId}; reuse that result instead of issuing duplicates`,
+          },
         };
-      }),
-    );
+      }
+
+      return {
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        toolArgs: toolCall.arguments,
+        result: resultByIndex.get(idx),
+      };
+    });
   }
 
   /**
@@ -754,6 +796,7 @@ Answer the question based on these findings:`,
         return this.tools.searchSymbols(projectId, {
           name: args.name as string,
           type: args.type as SymbolType | undefined,
+          pathPattern: args.pathPattern as string | undefined,
         });
 
       case "search_code":
@@ -861,7 +904,7 @@ Answer the question based on these findings:`,
       {
         name: "search_symbols",
         description:
-          "Search for symbols (functions, classes, types, etc.) by name. Case-insensitive partial match. Returns symbol name, type, file path, and context.",
+          "Search for symbols (functions, classes, types, etc.) by name. Case-insensitive partial match. Returns symbol name, type, file path, and context. Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
         parameters: {
           name: {
             type: "string",
@@ -870,6 +913,11 @@ Answer the question based on these findings:`,
           type: {
             type: "string",
             description: "Optional symbol type filter (function, class, interface, type, enum, etc.)",
+          },
+          pathPattern: {
+            type: "string",
+            description:
+              "Optional case-insensitive substring matched against the full file path to limit the search scope (e.g. 'order.service', 'modules/auth').",
           },
         },
         required: ["name"],

@@ -209,9 +209,15 @@ export class AgentToolsService {
    * Search symbols by name and/or type
    * Examples: search_symbols("AuthService"), search_symbols("login", "function")
    */
-  async searchSymbols(projectId: string, { name, type }: AgentToolSearchSymbol): Promise<ToolResult<SymbolInfo[]>> {
+  async searchSymbols(
+    projectId: string,
+    { name, type, pathPattern }: AgentToolSearchSymbol,
+  ): Promise<ToolResult<SymbolInfo[]>> {
     try {
-      this.logger.debug(`searchSymbols(name=${name}, type=${type ?? ""})`);
+      this.logger.debug(`searchSymbols(name=${name}, type=${type ?? ""}, pathPattern=${pathPattern ?? ""})`);
+
+      // strip glob-style wildcards from the path filter — fullPath uses a substring match, so wildcards aren't meaningful
+      const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
       const symbols = await this.prisma.symbol.findMany({
         where: {
@@ -221,6 +227,16 @@ export class AgentToolsService {
             mode: "insensitive",
           },
           ...(type ? { type: type } : {}),
+          ...(pathSubstring
+            ? {
+                codeFile: {
+                  fullPath: {
+                    contains: pathSubstring,
+                    mode: "insensitive",
+                  },
+                },
+              }
+            : {}),
         },
         include: {
           codeFile: {
@@ -232,12 +248,22 @@ export class AgentToolsService {
         take: 50, // limit results
       });
 
-      const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
-        name: symbol.name,
-        type: symbol.type,
-        filePath: symbol.codeFile.fullPath,
-        context: symbol.context ?? undefined,
-      }));
+      // dedup by (name, type, filePath) — the indexer can emit the same symbol multiple times (once per class member etc.); identical rows are noise for the LLM
+      const seen = new Set<string>();
+      const symbolInfos: SymbolInfo[] = [];
+      for (const symbol of symbols) {
+        const key = `${symbol.name}::${symbol.type}::${symbol.codeFile.fullPath}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        symbolInfos.push({
+          name: symbol.name,
+          type: symbol.type,
+          filePath: symbol.codeFile.fullPath,
+          context: symbol.context ?? undefined,
+        });
+      }
 
       return {
         success: true,

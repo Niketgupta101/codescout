@@ -23,7 +23,7 @@ export const CodeFileSearchSchema = z.object({
     .positive()
     .max(50)
     .optional()
-    .describe("Maximum number of results to return. Defaults to 10."),
+    .describe("Maximum number of results to return. Defaults to 3; raise to 5-8 only when the first batch is clearly insufficient."),
 });
 
 export type CodeFileSearchInput = z.infer<typeof CodeFileSearchSchema>;

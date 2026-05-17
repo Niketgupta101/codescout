@@ -9,4 +9,8 @@ export class AgentToolSearchSymbol {
   @IsOptionalLc()
   @IsEnumLc(SymbolType)
   type?: SymbolType;
+
+  @IsOptionalLc()
+  @IsStringLc()
+  pathPattern?: string;
 }

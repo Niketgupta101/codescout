@@ -17,6 +17,13 @@ export const SymbolSearchSchema = z.object({
     .describe(
       "Optional filter by symbol kind (function, class, interface, type, enum, variable, module, heading, term).",
     ),
+  pathPattern: z
+    .string()
+    .optional()
+    .describe(
+      "Optional case-insensitive substring matched against the full file path to limit the search scope " +
+        "(e.g. 'order.service', 'modules/auth'). Use when the same symbol name exists in many files.",
+    ),
 });
 
 export type SymbolSearchInput = z.infer<typeof SymbolSearchSchema>;
