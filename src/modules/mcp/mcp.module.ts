@@ -28,6 +28,10 @@ import { McpActorService } from "./mcp-actor.service";
         "- If you know a symbol name, start with symbolSearch — never read_file a large service file just to find one function.",
         "- codeFileRead returns the entire file with no truncation; reserve it for small files (controllers, DTOs, types).",
         "- For server-side agentic Q&A, also see chatMessageCreate — it drives the same primitives internally and returns raw findings.",
+        "",
+        "Cross-project discovery:",
+        "- For questions like 'do we have X in any of our projects?', call codeFileSearch or symbolSearch WITHOUT projectId or gitRemoteUrl. Results include projectId + projectName per hit so you can drill in with the scoped tools afterwards.",
+        "- codeFileRead and codeFileReadRange always require a project — once cross-project discovery points you at the right project, pass that projectId on the read.",
       ].join("\n"),
       // auth is enforced inline by McpActorService.actorResolve at the start of every tool
       allowUnauthenticatedAccess: true,

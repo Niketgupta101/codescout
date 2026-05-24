@@ -1,4 +1,6 @@
 export type SymbolInfo = {
+  projectId: string;
+  projectName: string;
   name: string;
   type: string;
   filePath: string;

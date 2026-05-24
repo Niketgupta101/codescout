@@ -5,7 +5,9 @@ export const SymbolSearchSchema = z.object({
   projectId: z
     .uuid()
     .optional()
-    .describe("Project UUID to search within. Provide this OR gitRemoteUrl."),
+    .describe(
+      "Project UUID to search within. Provide projectId OR gitRemoteUrl to scope to one project; omit BOTH for cross-project discovery across every project you can read.",
+    ),
   gitRemoteUrl: z
     .url()
     .optional()

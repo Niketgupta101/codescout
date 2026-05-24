@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { OpenAIService } from "../openai/openai.service";
+import type { Actor } from "../actor/types/actor.type";
 import type { ToolResult } from "./types/tool-result.type";
 import type { FileInfo } from "./types/file-info.type";
 import type { SymbolInfo } from "./types/symbol-info.type";
@@ -231,11 +232,19 @@ export class AgentToolsService {
               fullPath: true,
             },
           },
+          project: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
         },
-        take: 50, // limit results
+        take: 50,
       });
 
       const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
+        projectId: symbol.project.id,
+        projectName: symbol.project.name,
         name: symbol.name,
         type: symbol.type,
         filePath: symbol.codeFile.fullPath,
@@ -455,6 +464,8 @@ export class AgentToolsService {
 
       const results = await this.prisma.$queryRawUnsafe<
         {
+          projectId: string;
+          projectName: string;
           path: string;
           documentType: string | null;
           summary: string | null;
@@ -463,11 +474,14 @@ export class AgentToolsService {
       >(
         `
         SELECT
+          p.id as "projectId",
+          p.name as "projectName",
           cf."fullPath" as path,
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
         FROM "CodeFile" cf
+        JOIN "Project" p ON cf."projectId" = p.id
         LEFT JOIN "Document" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = '${projectId}'
@@ -480,6 +494,8 @@ export class AgentToolsService {
       );
 
       const fileResults: FileSearchResult[] = results.map((r) => ({
+        projectId: r.projectId,
+        projectName: r.projectName,
         path: r.path,
         documentType: r.documentType,
         summary: r.summary ?? "",
@@ -492,6 +508,172 @@ export class AgentToolsService {
       };
     } catch (error) {
       this.logger.error("Failed to search files", error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Cross-project variant of searchFiles. Searches summary embeddings across every project the actor can read.
+   * Returns results enriched with projectId + projectName so the caller can disambiguate or drill in with scoped tools.
+   */
+  async searchFilesAcrossProjects(
+    actor: Actor,
+    query: string,
+    documentTypes?: string[],
+    topK = 3,
+  ): Promise<ToolResult<FileSearchResult[]>> {
+    try {
+      this.logger.debug(
+        `searchFilesAcrossProjects(query=${query}, types=${(documentTypes ?? []).join(",")}, topK=${topK})`,
+      );
+
+      // resolve the set of projects the actor can read once, then constrain the vector query to that set
+      // empty access => empty result without hitting pgvector at all
+      const accessibleProjects = await this.prisma.project.findMany({
+        where: actor.accessContext.getWhereInputFor("read", "Project"),
+        select: { id: true },
+      });
+
+      if (accessibleProjects.length === 0) {
+        return { success: true, data: [] };
+      }
+
+      const projectIds = accessibleProjects.map((project) => project.id);
+
+      const { embedding: queryEmbedding } = await this.openaiService.generateEmbedding({ input: query });
+      const embeddingStr = `[${queryEmbedding.join(",")}]`;
+
+      const hasDocTypeFilter = documentTypes && documentTypes.length > 0;
+      const documentTypeFilter = hasDocTypeFilter
+        ? `AND (d."documentType"::text = ANY($4::text[]) OR r."type"::text = ANY($4::text[]))`
+        : "";
+
+      const params = hasDocTypeFilter
+        ? [embeddingStr, topK, projectIds, documentTypes]
+        : [embeddingStr, topK, projectIds];
+
+      const results = await this.prisma.$queryRawUnsafe<
+        {
+          projectId: string;
+          projectName: string;
+          path: string;
+          documentType: string | null;
+          summary: string | null;
+          similarity: number;
+        }[]
+      >(
+        `
+        SELECT
+          p.id as "projectId",
+          p.name as "projectName",
+          cf."fullPath" as path,
+          COALESCE(d."documentType"::text, r."type"::text) as "documentType",
+          cf.summary,
+          1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
+        FROM "CodeFile" cf
+        JOIN "Project" p ON cf."projectId" = p.id
+        LEFT JOIN "Document" d ON cf."documentId" = d.id
+        LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
+        WHERE cf."projectId" = ANY($3::uuid[])
+          AND cf."summaryEmbedding" IS NOT NULL
+          ${documentTypeFilter}
+        ORDER BY cf."summaryEmbedding" <=> $1::halfvec
+        LIMIT $2
+      `,
+        ...params,
+      );
+
+      const fileResults: FileSearchResult[] = results.map((row) => ({
+        projectId: row.projectId,
+        projectName: row.projectName,
+        path: row.path,
+        documentType: row.documentType,
+        summary: row.summary ?? "",
+        similarity: row.similarity,
+      }));
+
+      return {
+        success: true,
+        data: fileResults,
+      };
+    } catch (error) {
+      this.logger.error("Failed to search files across projects", error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Cross-project variant of searchSymbols. Applies the actor's CASL Project filter so only readable projects contribute hits.
+   * Returns results enriched with projectId + projectName.
+   */
+  async searchSymbolsAcrossProjects(
+    actor: Actor,
+    { name, type, pathPattern }: AgentToolSearchSymbol,
+  ): Promise<ToolResult<SymbolInfo[]>> {
+    try {
+      this.logger.debug(
+        `searchSymbolsAcrossProjects(name=${name}, type=${type ?? ""}, pathPattern=${pathPattern ?? ""})`,
+      );
+
+      const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
+
+      const symbols = await this.prisma.symbol.findMany({
+        where: {
+          project: actor.accessContext.getWhereInputFor("read", "Project"),
+          name: {
+            contains: name,
+            mode: "insensitive",
+          },
+          ...(type ? { type: type } : {}),
+          ...(pathSubstring
+            ? {
+                codeFile: {
+                  fullPath: {
+                    contains: pathSubstring,
+                    mode: "insensitive",
+                  },
+                },
+              }
+            : {}),
+        },
+        include: {
+          codeFile: {
+            select: {
+              fullPath: true,
+            },
+          },
+          project: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        take: 50,
+      });
+
+      const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
+        projectId: symbol.project.id,
+        projectName: symbol.project.name,
+        name: symbol.name,
+        type: symbol.type,
+        filePath: symbol.codeFile.fullPath,
+        startLine: symbol.startLine ?? undefined,
+        endLine: symbol.endLine ?? undefined,
+      }));
+
+      return {
+        success: true,
+        data: symbolInfos,
+      };
+    } catch (error) {
+      this.logger.error("Failed to search symbols across projects", error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),

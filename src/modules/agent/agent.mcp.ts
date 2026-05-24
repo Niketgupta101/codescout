@@ -22,11 +22,23 @@ export class AgentMcp {
     description:
       "Semantic search over file summaries (NOT raw content). Use only when the question is fuzzy/conceptual and you don't already know a symbol name or a path hint. " +
       "If you know a symbol name, use symbolSearch instead. If you know a path pattern, use list_files-style filters. " +
-      "Pairs with codeFileRead, codeFileReadRange, and symbolSearch — load those tools together for code questions.",
+      "Pairs with codeFileRead, codeFileReadRange, and symbolSearch — load those tools together for code questions. " +
+      "Cross-project: omit BOTH projectId and gitRemoteUrl to search across every project you have access to (use for 'do we have X in any project?' questions). Each hit includes projectId + projectName for drill-in.",
     parameters: CodeFileSearchSchema,
   })
   async codeFileSearch(codeFileSearchInput: CodeFileSearchInput, _context: Context, request?: McpToolRequest) {
     const actor = await this.mcpActorService.actorResolve(request);
+
+    // cross-project mode: caller didn't specify a project, so search every readable project
+    if (!codeFileSearchInput.projectId && !codeFileSearchInput.gitRemoteUrl) {
+      return this.agentToolsService.searchFilesAcrossProjects(
+        actor,
+        codeFileSearchInput.query,
+        codeFileSearchInput.documentTypes,
+        codeFileSearchInput.topK,
+      );
+    }
+
     const project = await this.mcpActorService.projectFindOneForAccessCheck({
       projectId: codeFileSearchInput.projectId,
       gitRemoteUrl: codeFileSearchInput.gitRemoteUrl,
@@ -93,14 +105,25 @@ export class AgentMcp {
     name: "symbolSearch",
     description:
       "PRIMARY ENTRY POINT for any named symbol (function, class, method, type, enum). " +
-      "Case-insensitive partial match. Returns name + type + file path + 1-indexed inclusive line range (startLine/endLine, when known). " +
+      "Case-insensitive partial match. Returns projectId + projectName + name + type + file path + 1-indexed inclusive line range (startLine/endLine, when known). " +
       "The returned line range is meant to be passed straight to codeFileReadRange — that's the canonical pair (symbolSearch → codeFileReadRange). " +
       "Scope with pathPattern (e.g. 'order.service') when the same symbol name exists in many files. " +
+      "Cross-project: omit BOTH projectId and gitRemoteUrl to discover the symbol across every project you have access to. " +
       "If codeFileReadRange isn't in your tool list yet, search for it now — it's the partner tool for this one.",
     parameters: SymbolSearchSchema,
   })
   async symbolSearch(symbolSearchInput: SymbolSearchInput, _context: Context, request?: McpToolRequest) {
     const actor = await this.mcpActorService.actorResolve(request);
+
+    // cross-project mode: caller didn't specify a project, so search every readable project
+    if (!symbolSearchInput.projectId && !symbolSearchInput.gitRemoteUrl) {
+      return this.agentToolsService.searchSymbolsAcrossProjects(actor, {
+        name: symbolSearchInput.name,
+        type: symbolSearchInput.type,
+        pathPattern: symbolSearchInput.pathPattern,
+      });
+    }
+
     const project = await this.mcpActorService.projectFindOneForAccessCheck({
       projectId: symbolSearchInput.projectId,
       gitRemoteUrl: symbolSearchInput.gitRemoteUrl,
