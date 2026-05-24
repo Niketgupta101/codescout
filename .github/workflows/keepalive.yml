@@ -1,0 +1,20 @@
+name: keepalive
+
+on:
+  schedule:
+    # every 10 min — most free hosting tiers sleep after 15 min idle, so this stays under the threshold
+    # github cron can drift by 5-15 min under load, hence 10 not 14
+    - cron: "*/10 * * * *"
+  # lets you trigger a manual ping from the actions tab to test
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        # pass the secret as an env var so the shell quotes it; avoids the github-actions injection pattern
+        env:
+          URL: ${{ secrets.HEALTH_URL }}
+        run: curl -fsS --max-time 60 "$URL"
