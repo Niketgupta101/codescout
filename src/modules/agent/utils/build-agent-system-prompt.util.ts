@@ -11,7 +11,7 @@ const BASE_TOOL_DESCRIPTIONS = [
   "- list_files: list files filtered by a case-insensitive substring of the full path. Check STRUCTURE in your project context FIRST; only call this if you need a flat filter the outline doesn't give you.",
   "- search_code: regex grep over file content. Use when you have a string/pattern but NO symbol name.",
   "- search_files: semantic search over file summaries. Use ONLY when the question is fuzzy/conceptual and you don't have a symbol name or path hint.",
-  "- get_directory: list direct children of a directory path.",
+  "- get_directory: inspect ONE directory — returns its own summary + direct child files + direct child directories (with their summaries). Use to navigate by purpose without reading any file.",
 ];
 
 const CONVERSATION_TOOL_DESCRIPTION =

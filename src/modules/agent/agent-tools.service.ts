@@ -9,6 +9,7 @@ import type { DirectoryNode } from "./types/directory-node.type";
 import type { FileSearchResult } from "./types/file-search-result.type";
 import type { AgentToolReadFileResult } from "./types/agent-tool-read-file-result.type";
 import type { AgentToolCodeMatch } from "./types/agent-tool-code-match.type";
+import type { DirectoryDetail } from "./types/directory-detail.type";
 import { AgentToolListFileDto } from "./dtos/agent-tool-list-file.dto";
 import { AgentToolSearchSymbol } from "./dtos/agent-tool-search-symbol.dto";
 import { AgentToolSearchCodeDto } from "./dtos/agent-tool-search-code.dto";
@@ -16,6 +17,20 @@ import { AgentToolSearchCodeDto } from "./dtos/agent-tool-search-code.dto";
 // safety cap on the number of lines a single read returns, applied to both readFile (whole-file) and readFileRange (specific span)
 // chosen to be generous enough that typical service files (200-1500 lines) fit unclipped, while bounding pathological cases (giant generated files)
 const MAX_READ_FILE_LINES = 1500;
+
+// cap project summary length when attached per-hit in cross-project search results
+// the system prompt's project_context block uses a separate (larger) cap because there's just one project there
+const PROJECT_SUMMARY_PER_HIT_CHARS = 240;
+
+const truncateProjectSummary = (summary: string | null | undefined): string | undefined => {
+  if (!summary) {
+    return undefined;
+  }
+  if (summary.length <= PROJECT_SUMMARY_PER_HIT_CHARS) {
+    return summary;
+  }
+  return summary.slice(0, PROJECT_SUMMARY_PER_HIT_CHARS).trimEnd() + "…";
+};
 
 @Injectable()
 export class AgentToolsService {
@@ -230,6 +245,7 @@ export class AgentToolsService {
           codeFile: {
             select: {
               fullPath: true,
+              directory: { select: { summary: true } },
             },
           },
           project: {
@@ -242,9 +258,11 @@ export class AgentToolsService {
         take: 50,
       });
 
+      // single-project mode: do NOT attach projectSummary — it's already in the system prompt's project_context block
       const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
         projectId: symbol.project.id,
         projectName: symbol.project.name,
+        directorySummary: symbol.codeFile.directory?.summary ?? undefined,
         name: symbol.name,
         type: symbol.type,
         filePath: symbol.codeFile.fullPath,
@@ -391,45 +409,67 @@ export class AgentToolsService {
     }
   }
 
-  async getDirectory(projectId: string, dirPath: string): Promise<ToolResult> {
+  async getDirectory(projectId: string, dirPath: string): Promise<ToolResult<DirectoryDetail>> {
     try {
       this.logger.debug(`getDirectory(path=${dirPath})`);
 
-      // normalize path
-      const normalizedPath = dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
+      // normalize for prefix matching of file paths and for the Directory.fullPath lookup
+      // Directory.fullPath is stored without the trailing slash; file paths under it always include it
+      const normalizedPathWithSlash = dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
+      const directoryLookupPath = dirPath.endsWith("/") ? dirPath.slice(0, -1) : dirPath;
+
+      // fetch the directory itself + its immediate children in one query each
+      // child directories whose parentId points at this row are the navigational next-level entries
+      const directoryRow = await this.prisma.directory.findUnique({
+        where: { projectId_fullPath: { projectId, fullPath: directoryLookupPath } },
+        select: { id: true, summary: true },
+      });
+
+      const childDirectories = directoryRow
+        ? await this.prisma.directory.findMany({
+            where: { projectId, parentId: directoryRow.id },
+            select: { fullPath: true, summary: true },
+            orderBy: { fullPath: "asc" },
+          })
+        : [];
 
       const files = await this.prisma.codeFile.findMany({
         where: {
           projectId,
-          fullPath: {
-            startsWith: normalizedPath,
-          },
+          fullPath: { startsWith: normalizedPathWithSlash },
         },
-        orderBy: {
-          fullPath: "asc",
-        },
+        orderBy: { fullPath: "asc" },
       });
 
-      // filter to only direct children (not nested)
-      const directChildren = files
-        .map((f) => {
-          const relativePath = f.fullPath.substring(normalizedPath.length);
-          const isDirectChild = !relativePath.includes("/");
+      // direct child files only — anything containing another "/" lives in a subdirectory, not at this level
+      const directChildFiles = files.flatMap((file) => {
+        const relativePath = file.fullPath.substring(normalizedPathWithSlash.length);
+        if (relativePath.includes("/")) {
+          return [];
+        }
 
-          if (isDirectChild) {
-            return {
-              path: f.fullPath,
-              language: f.language,
-              lines: (f.metadata as { lines?: number })?.lines ?? 0,
-            };
-          }
-          return null;
-        })
-        .filter((f) => f !== null);
+        return [
+          {
+            path: file.fullPath,
+            language: file.language,
+            lines: (file.metadata as { lines?: number })?.lines ?? 0,
+          },
+        ];
+      });
+
+      const detail: DirectoryDetail = {
+        path: dirPath,
+        summary: directoryRow?.summary ?? undefined,
+        files: directChildFiles,
+        childDirectories: childDirectories.map((child) => ({
+          path: child.fullPath,
+          summary: child.summary ?? undefined,
+        })),
+      };
 
       return {
         success: true,
-        data: directChildren,
+        data: detail,
       };
     } catch (error) {
       this.logger.error("Failed to get directory", error);
@@ -467,6 +507,7 @@ export class AgentToolsService {
           projectId: string;
           projectName: string;
           path: string;
+          directorySummary: string | null;
           documentType: string | null;
           summary: string | null;
           similarity: number;
@@ -477,11 +518,13 @@ export class AgentToolsService {
           p.id as "projectId",
           p.name as "projectName",
           cf."fullPath" as path,
+          dir.summary as "directorySummary",
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
         FROM "CodeFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
+        LEFT JOIN "Directory" dir ON cf."directoryId" = dir.id
         LEFT JOIN "Document" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = '${projectId}'
@@ -493,10 +536,12 @@ export class AgentToolsService {
         ...params,
       );
 
+      // single-project mode: do NOT attach projectSummary — it's already in the system prompt's project_context block
       const fileResults: FileSearchResult[] = results.map((r) => ({
         projectId: r.projectId,
         projectName: r.projectName,
         path: r.path,
+        directorySummary: r.directorySummary ?? undefined,
         documentType: r.documentType,
         summary: r.summary ?? "",
         similarity: r.similarity,
@@ -559,7 +604,9 @@ export class AgentToolsService {
         {
           projectId: string;
           projectName: string;
+          projectSummary: string | null;
           path: string;
+          directorySummary: string | null;
           documentType: string | null;
           summary: string | null;
           similarity: number;
@@ -569,12 +616,15 @@ export class AgentToolsService {
         SELECT
           p.id as "projectId",
           p.name as "projectName",
+          p.summary as "projectSummary",
           cf."fullPath" as path,
+          dir.summary as "directorySummary",
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
         FROM "CodeFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
+        LEFT JOIN "Directory" dir ON cf."directoryId" = dir.id
         LEFT JOIN "Document" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = ANY($3::uuid[])
@@ -586,10 +636,13 @@ export class AgentToolsService {
         ...params,
       );
 
+      // cross-project: attach projectSummary (truncated) so the LLM knows what each hit's project is about without a follow-up call
       const fileResults: FileSearchResult[] = results.map((row) => ({
         projectId: row.projectId,
         projectName: row.projectName,
+        projectSummary: truncateProjectSummary(row.projectSummary),
         path: row.path,
+        directorySummary: row.directorySummary ?? undefined,
         documentType: row.documentType,
         summary: row.summary ?? "",
         similarity: row.similarity,
@@ -646,21 +699,26 @@ export class AgentToolsService {
           codeFile: {
             select: {
               fullPath: true,
+              directory: { select: { summary: true } },
             },
           },
           project: {
             select: {
               id: true,
               name: true,
+              summary: true,
             },
           },
         },
         take: 50,
       });
 
+      // cross-project: attach projectSummary (truncated) so the LLM knows what each hit's project is about without a follow-up call
       const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
         projectId: symbol.project.id,
         projectName: symbol.project.name,
+        projectSummary: truncateProjectSummary(symbol.project.summary),
+        directorySummary: symbol.codeFile.directory?.summary ?? undefined,
         name: symbol.name,
         type: symbol.type,
         filePath: symbol.codeFile.fullPath,

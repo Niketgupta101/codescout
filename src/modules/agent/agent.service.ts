@@ -1076,7 +1076,10 @@ Answer the question based on these findings:`,
       },
       {
         name: "get_directory",
-        description: "List files in a specific directory path. Returns direct children only (not nested).",
+        description:
+          "Inspect a single directory: returns the directory's own summary (when indexed), the direct child FILES, and the direct child DIRECTORIES with their summaries. " +
+          "Useful as a one-shot 'what's in here?' — child-directory summaries let you decide where to drill next without reading any file. " +
+          "Prefer this over list_files when you want to navigate the hierarchy by purpose; use list_files when you only need a flat file list.",
         parameters: {
           path: {
             type: "string",
