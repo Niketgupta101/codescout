@@ -29,6 +29,10 @@ const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   type: SymbolType.type,
   enum: SymbolType.enum,
   method: SymbolType.function,
+  // arrow functions come out of the parser as their own chunkType — without this mapping every `const x = () => ...` export was getting dropped at the indexer stage
+  "arrow-function": SymbolType.function,
+  // emitted for non-function constants (object literals, array literals, CallExpression results like axios.create(...), styled.div`...` defaults that don't tie to an inner identifier)
+  variable: SymbolType.variable,
 };
 
 @Injectable()

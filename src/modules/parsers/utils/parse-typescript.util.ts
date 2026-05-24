@@ -58,14 +58,61 @@ const extractTypescriptStructures = (sourceFile: SourceFile, filePath: string): 
   for (const statement of sourceFile.getVariableStatements()) {
     for (const declaration of statement.getDeclarations()) {
       const initializer = declaration.getInitializer();
-      if (initializer && Node.isArrowFunction(initializer)) {
-        nodes.push(extractTypescriptArrowFunction(declaration, sourceFile));
+      if (!initializer) {
+        continue;
       }
+
+      // 1. direct arrow function: const foo = () => ...
+      if (Node.isArrowFunction(initializer)) {
+        nodes.push(extractTypescriptArrowFunction(declaration, sourceFile));
+        continue;
+      }
+
+      // 2. HOC-wrapped arrow / function: const Foo = memo(() => ...), forwardRef((p, r) => ...), observer(...), etc.
+      //    we unwrap the inner function so we still capture parameters/returnType, but the symbol's name/range track the outer variable
+      if (Node.isCallExpression(initializer)) {
+        const innerFunction = initializer
+          .getArguments()
+          .find((arg) => Node.isArrowFunction(arg) || Node.isFunctionExpression(arg));
+
+        if (innerFunction && (Node.isArrowFunction(innerFunction) || Node.isFunctionExpression(innerFunction))) {
+          nodes.push(extractTypescriptHocWrappedFunction(declaration, innerFunction, sourceFile));
+          continue;
+        }
+
+        // 3. CallExpression initializer with no inner function: createTheme(...), axios.create(...), create<S>()(...)
+        //    emit as a variable so the export is searchable by name even though we can't capture function metadata
+        nodes.push(extractTypescriptVariable(declaration, sourceFile));
+        continue;
+      }
+
+      // 4. styled-components: const Button = styled.div`...`
+      if (Node.isTaggedTemplateExpression(initializer)) {
+        nodes.push(extractTypescriptTaggedTemplate(declaration, sourceFile));
+        continue;
+      }
+
+      // 5. object literal: strings maps, refine resource objects, service-as-object singletons, styles maps
+      if (Node.isObjectLiteralExpression(initializer)) {
+        nodes.push(extractTypescriptVariable(declaration, sourceFile));
+        continue;
+      }
+
+      // 6. array literal: resource lists, plan arrays
+      if (Node.isArrayLiteralExpression(initializer)) {
+        nodes.push(extractTypescriptVariable(declaration, sourceFile));
+        continue;
+      }
+
+      // primitives (strings, numbers, booleans) and identifier re-exports are intentionally not indexed — they'd add noise
     }
   }
 
-  // anonymous default-export functions (e.g. next.js: export default () => <div />)
-  // skip cases where the default export references a named symbol — those are already extracted by the loops above
+  // default exports — handle four shapes:
+  //  a. export default () => <div />            (anonymous arrow/function literal)
+  //  b. export default memo(() => <div />)      (HOC-wrapped anonymous function)
+  //  c. export default memo(Foo)                (HOC-wrapped named identifier — skipped because Foo was already extracted above)
+  //  d. export default styled.div`...`          (tagged template)
   for (const exportAssignment of sourceFile.getExportAssignments()) {
     // ignore CommonJS-style "export = X"; only handle "export default X"
     if (exportAssignment.isExportEquals()) {
@@ -74,10 +121,28 @@ const extractTypescriptStructures = (sourceFile: SourceFile, filePath: string): 
 
     const expression = exportAssignment.getExpression();
 
-    // only synthesize a symbol when the default export is an inline function literal
-    // (named identifiers, calls, object literals etc. are out of scope; named symbols are already covered)
+    // case a: bare anonymous arrow/function literal
     if (Node.isArrowFunction(expression) || Node.isFunctionExpression(expression)) {
       nodes.push(extractTypescriptAnonymousDefaultExport(exportAssignment, sourceFile, filePath));
+      continue;
+    }
+
+    // case b/c: CallExpression default export
+    if (Node.isCallExpression(expression)) {
+      const hasInnerAnonymousFunction = expression
+        .getArguments()
+        .some((arg) => Node.isArrowFunction(arg) || Node.isFunctionExpression(arg));
+
+      // only emit when the inner function is anonymous; identifier-arg case (memo(Foo)) is already covered by Foo's variable declaration above
+      if (hasInnerAnonymousFunction) {
+        nodes.push(extractTypescriptDefaultExportSynthesized(exportAssignment, sourceFile, filePath));
+      }
+      continue;
+    }
+
+    // case d: tagged template
+    if (Node.isTaggedTemplateExpression(expression)) {
+      nodes.push(extractTypescriptDefaultExportSynthesized(exportAssignment, sourceFile, filePath));
     }
   }
 
@@ -377,6 +442,166 @@ const extractTypescriptAnonymousDefaultExport = (
   };
 };
 
+// HOC-wrapped function: const Foo = memo(() => ...), forwardRef((p, r) => ...), observer(...), withRouter((p) => ...)
+// the symbol's name + line range track the OUTER variable (so search_symbols("Foo") finds it),
+// but parameters/returnType/isAsync come from the INNER function so the captured metadata stays accurate
+const extractTypescriptHocWrappedFunction = (
+  declaration: VariableDeclaration,
+  innerFunction: Node,
+  sourceFile: SourceFile,
+): ASTNode => {
+  if (!Node.isArrowFunction(innerFunction) && !Node.isFunctionExpression(innerFunction)) {
+    throw new Error("extractTypescriptHocWrappedFunction called with non-function inner");
+  }
+
+  const name = declaration.getName();
+  const variableStatement = declaration.getVariableStatement();
+  const isExported = variableStatement ? variableStatement.isExported() : false;
+  const isAsync = innerFunction.isAsync();
+
+  const parameters = innerFunction
+    .getParameters()
+    .map((param) => `${param.getName()}: ${param.getType().getText()}`);
+  const returnType = innerFunction.getReturnType().getText();
+
+  const jsDocComments = variableStatement ? variableStatement.getJsDocs() : [];
+  const jsDoc = jsDocComments.length > 0 ? jsDocComments[0].getDescription().trim() : undefined;
+
+  const startLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getStart() : declaration.getStart(),
+  ).line;
+  const endLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getEnd() : declaration.getEnd(),
+  ).line;
+
+  const content = variableStatement ? variableStatement.getText() : declaration.getText();
+
+  const metadata: CodeMetadata = {
+    startLine,
+    endLine,
+    language: "typescript",
+    chunkType: "arrow-function",
+    name,
+    parameters,
+    returnType,
+    isExported,
+    isAsync,
+    jsDoc,
+    imports: extractTypescriptImports(sourceFile),
+    complexity: calculateTypescriptComplexity(content),
+  };
+
+  return {
+    type: "function",
+    name,
+    content,
+    metadata,
+  };
+};
+
+// styled-components: const Button = styled.div`...`
+// emitted as a function symbol since callers treat the result as a renderable component
+const extractTypescriptTaggedTemplate = (declaration: VariableDeclaration, sourceFile: SourceFile): ASTNode => {
+  const name = declaration.getName();
+  const variableStatement = declaration.getVariableStatement();
+  const isExported = variableStatement ? variableStatement.isExported() : false;
+
+  const startLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getStart() : declaration.getStart(),
+  ).line;
+  const endLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getEnd() : declaration.getEnd(),
+  ).line;
+
+  const content = variableStatement ? variableStatement.getText() : declaration.getText();
+
+  const metadata: CodeMetadata = {
+    startLine,
+    endLine,
+    language: "typescript",
+    chunkType: "function",
+    name,
+    isExported,
+  };
+
+  return {
+    type: "function",
+    name,
+    content,
+    metadata,
+  };
+};
+
+// constant declarations that aren't function-shaped:
+//  - object literals (strings maps, refine resources, services-as-objects, styles maps)
+//  - array literals (resource lists)
+//  - call expressions that don't wrap a function (axios.create(...), createTheme(...))
+// indexed as "variable" type so search_symbols still surfaces them by name; no parameters/returnType captured
+const extractTypescriptVariable = (declaration: VariableDeclaration, sourceFile: SourceFile): ASTNode => {
+  const name = declaration.getName();
+  const variableStatement = declaration.getVariableStatement();
+  const isExported = variableStatement ? variableStatement.isExported() : false;
+
+  const jsDocComments = variableStatement ? variableStatement.getJsDocs() : [];
+  const jsDoc = jsDocComments.length > 0 ? jsDocComments[0].getDescription().trim() : undefined;
+
+  const startLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getStart() : declaration.getStart(),
+  ).line;
+  const endLine = sourceFile.getLineAndColumnAtPos(
+    variableStatement ? variableStatement.getEnd() : declaration.getEnd(),
+  ).line;
+
+  const content = variableStatement ? variableStatement.getText() : declaration.getText();
+
+  const metadata: CodeMetadata = {
+    startLine,
+    endLine,
+    language: "typescript",
+    chunkType: "variable",
+    name,
+    isExported,
+    jsDoc,
+  };
+
+  return {
+    type: "variable",
+    name,
+    content,
+    metadata,
+  };
+};
+
+// CallExpression / TaggedTemplate default exports — when we can't statically tie the export to an already-extracted variable,
+// synthesize a symbol from the filepath (same helper next.js anonymous-component default exports use)
+const extractTypescriptDefaultExportSynthesized = (
+  exportAssignment: ExportAssignment,
+  sourceFile: SourceFile,
+  filePath: string,
+): ASTNode => {
+  const name = deriveDefaultExportSymbolName(filePath);
+
+  const startLine = sourceFile.getLineAndColumnAtPos(exportAssignment.getStart()).line;
+  const endLine = sourceFile.getLineAndColumnAtPos(exportAssignment.getEnd()).line;
+  const content = exportAssignment.getText();
+
+  const metadata: CodeMetadata = {
+    startLine,
+    endLine,
+    language: "typescript",
+    chunkType: "function",
+    name,
+    isExported: true,
+  };
+
+  return {
+    type: "function",
+    name,
+    content,
+    metadata,
+  };
+};
+
 const extractTypescriptImports = (sourceFile: SourceFile): string[] => {
   const imports: string[] = [];
 
@@ -402,38 +627,27 @@ const calculateTypescriptComplexity = (code: string): "low" | "medium" | "high" 
 };
 
 const convertAstNodesToParsedDocument = (filePath: string, astNodes: ASTNode[]): ParsedDocument => {
-  // if file has only 1 element with no children, make the file itself a leaf node
-  if (astNodes.length === 1 && !astNodes[0].children) {
-    return {
-      sourceFile: filePath,
-      format: "code",
-      sections: [],
-      rawContent: astNodes[0].content,
-      metadata: astNodes[0].metadata,
-    };
-  }
+  // every top-level node becomes a section so the downstream symbol extractor can read chunkType + name from the chunk
+  // for nodes with children (classes) we emit the parent class as its own chunk PLUS one chunk per child method;
+  //   without this the class itself was never indexed (only its methods were), and entity/module/empty-class files came out at 0 symbols
+  const sections = astNodes.map((node) => {
+    const parentChunk = { content: node.content, metadata: node.metadata };
+    const childChunks = (node.children ?? []).map((child) => ({
+      content: child.content,
+      metadata: child.metadata,
+    }));
 
-  // otherwise, create hierarchical structure with sections
-  const sections = astNodes.map((node) => ({
-    heading: node.name,
-    content: "",
-    depth: 1,
-    chunks: node.children
-      ? node.children.map((child) => ({
-          content: child.content,
-          metadata: child.metadata,
-        }))
-      : [
-          {
-            content: node.content,
-            metadata: node.metadata,
-          },
-        ],
-    metadata: {
-      nodeType: node.type,
-      ...node.metadata,
-    },
-  }));
+    return {
+      heading: node.name,
+      content: "",
+      depth: 1,
+      chunks: [parentChunk, ...childChunks],
+      metadata: {
+        nodeType: node.type,
+        ...node.metadata,
+      },
+    };
+  });
 
   return {
     sourceFile: filePath,
