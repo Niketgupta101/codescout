@@ -165,8 +165,7 @@ model Symbol {
   codeFile   CodeFile   @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
   name       String
   type       SymbolType
-  context    String?    @db.Text
-  // 1-indexed inclusive line range of the symbol within the source file; null for symbols without a known span (e.g. parent-class shortcut rows, markdown headings indexed before this field existed)
+  // 1-indexed inclusive line range of the symbol within the source file; null for non-code symbol kinds (e.g. CSV epic/storyId rows)
   startLine  Int?
   endLine    Int?
   createdAt  DateTime   @default(now())

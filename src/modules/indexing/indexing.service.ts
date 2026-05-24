@@ -442,7 +442,7 @@ export class IndexingService {
       // extract section-level symbols
       const metadata = section.metadata ?? {};
 
-      // epic name (CSV)
+      // epic name (CSV) — domain lookup for user-story projects, distinct from markdown headings
       const epicName = metadata.epicName;
       if (epicName && typeof epicName === "string") {
         await this.prisma.symbol.create({
@@ -451,33 +451,19 @@ export class IndexingService {
             codeFileId,
             type: "heading",
             name: epicName,
-            context: section.heading,
           },
         });
         count++;
       }
 
-      // heading (Markdown)
-      const heading = metadata.heading;
-      if (heading && typeof heading === "string") {
-        await this.prisma.symbol.create({
-          data: {
-            projectId,
-            codeFileId,
-            type: "heading",
-            name: heading,
-            context: parsed.sourceFile,
-          },
-        });
-        count++;
-      }
+      // markdown headings are intentionally NOT emitted as symbols — codeFileSearch over file summaries handles "find docs about X" better than keyword lookup over heading text
 
       // extract chunk-level symbols
       const chunks = section.chunks ?? [];
       for (const chunk of chunks) {
         const chunkMetadata = chunk.metadata ?? {};
 
-        // story ID (CSV)
+        // story ID (CSV) — domain lookup for user-story projects
         const storyId = chunkMetadata.storyId;
         if (storyId && typeof storyId === "string") {
           await this.prisma.symbol.create({
@@ -486,7 +472,6 @@ export class IndexingService {
               codeFileId,
               type: "term",
               name: storyId,
-              context: chunk.content.substring(0, 100),
             },
           });
           count++;
@@ -496,28 +481,10 @@ export class IndexingService {
         const chunkType = chunkMetadata.chunkType;
         const name = chunkMetadata.name;
         if (chunkType && name) {
-          count += await this._extractCodeSymbols(projectId, codeFileId, chunkMetadata, parsed.sourceFile);
+          count += await this._extractCodeSymbols(projectId, codeFileId, chunkMetadata);
         }
 
-        // keywords (Markdown)
-        const keywords = chunkMetadata.keywords;
-        if (keywords && Array.isArray(keywords)) {
-          const keywordArray = keywords as unknown[];
-          for (const keyword of keywordArray.slice(0, 5)) {
-            if (typeof keyword === "string") {
-              await this.prisma.symbol.create({
-                data: {
-                  projectId,
-                  codeFileId,
-                  type: "term",
-                  name: keyword,
-                  context: chunk.content.substring(0, 100),
-                },
-              });
-              count++;
-            }
-          }
-        }
+        // markdown keyword terms are intentionally NOT emitted — extracted top-5 keywords were stopwords ("for", "see", "github") that polluted symbolSearch results
       }
     }
 
@@ -528,9 +495,7 @@ export class IndexingService {
     projectId: string,
     codeFileId: string,
     metadata: Record<string, unknown>,
-    filePath: string,
   ): Promise<number> {
-    let count = 0;
     const chunkType = typeof metadata.chunkType === "string" ? metadata.chunkType : undefined;
     const name = typeof metadata.name === "string" ? metadata.name : undefined;
 
@@ -547,37 +512,19 @@ export class IndexingService {
     const startLine = typeof metadata.startLine === "number" ? metadata.startLine : null;
     const endLine = typeof metadata.endLine === "number" ? metadata.endLine : null;
 
-    // create symbol
     await this.prisma.symbol.create({
       data: {
         projectId,
         codeFileId,
         type: symbolType,
         name,
-        context: filePath,
         startLine,
         endLine,
       },
     });
-    count++;
 
-    // for methods, also extract parent class
-    // the chunk metadata is the method's, so we don't know the class's range from here — leave it null and let searchSymbols dedup the duplicates from N methods
-    const parentClass = typeof metadata.parentClass === "string" ? metadata.parentClass : undefined;
-    if (chunkType === "method" && parentClass) {
-      await this.prisma.symbol.create({
-        data: {
-          projectId,
-          codeFileId,
-          type: "class",
-          name: parentClass,
-          context: `${filePath} (parent class)`,
-        },
-      });
-      count++;
-    }
-
-    return count;
+    // parent-class shortcut rows are intentionally NOT emitted — the class declaration walk already produces a class row with a real line range
+    return 1;
   }
 
   async _deleteOrphanedFiles(projectId: string, repositoryId: string, currentFilePaths: Set<string>): Promise<number> {

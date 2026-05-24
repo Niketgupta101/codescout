@@ -235,22 +235,10 @@ export class AgentToolsService {
         take: 50, // limit results
       });
 
-      // dedup by (name, type, filePath) — the indexer can emit the same symbol multiple times (once per class member etc.); identical rows are noise for the LLM
-      // when duplicates differ on startLine (e.g. parent-class row from a method has null, the real class row has a span), prefer the one with a span
-      const bestByKey = new Map<string, (typeof symbols)[number]>();
-      for (const symbol of symbols) {
-        const key = `${symbol.name}::${symbol.type}::${symbol.codeFile.fullPath}`;
-        const existing = bestByKey.get(key);
-        if (!existing || (existing.startLine === null && symbol.startLine !== null)) {
-          bestByKey.set(key, symbol);
-        }
-      }
-
-      const symbolInfos: SymbolInfo[] = [...bestByKey.values()].map((symbol) => ({
+      const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
         name: symbol.name,
         type: symbol.type,
         filePath: symbol.codeFile.fullPath,
-        context: symbol.context ?? undefined,
         startLine: symbol.startLine ?? undefined,
         endLine: symbol.endLine ?? undefined,
       }));

@@ -15,7 +15,7 @@ export const SymbolSearchSchema = z.object({
     .enum(Object.values(SymbolType) as [SymbolType, ...SymbolType[]])
     .optional()
     .describe(
-      "Optional filter by symbol kind (function, class, interface, type, enum, variable, module, heading, term).",
+      "Optional filter by symbol kind (function, class, interface, type, enum; heading/term used for CSV domain rows only).",
     ),
   pathPattern: z
     .string()
