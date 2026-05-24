@@ -31,6 +31,15 @@ export const ChatMessageCreateSchema = z.object({
     .string()
     .optional()
     .describe("Optional title for the new conversation. Ignored when conversationId is provided."),
+  persist: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whether to persist this exchange as a Conversation + Messages (with embeddings). " +
+        "Defaults to false — stateless one-shot, no DB writes. " +
+        "Set true only when you want server-side conversation history (e.g. a web UI that lists prior chats); " +
+        "ignored when conversationId is provided, since continuing an existing conversation always persists.",
+    ),
 });
 
 export type ChatMessageCreateInput = z.infer<typeof ChatMessageCreateSchema>;

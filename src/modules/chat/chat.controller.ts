@@ -13,6 +13,8 @@ export class ChatController {
    */
   @Post("messages")
   async sendMessage(@Param("projectId") projectId: string, @Body() dto: SendMessageDto) {
-    return this.chatService.sendMessage(projectId, dto);
+    // web UI historically relied on auto-create-conversation when no conversationId was sent;
+    // default persist to true here so that behavior is preserved while MCP can opt out
+    return this.chatService.sendMessage(projectId, { ...dto, persist: dto.persist ?? true });
   }
 }

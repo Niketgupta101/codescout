@@ -35,9 +35,10 @@ export class ChatService {
   }
 
   /**
-   * Unified message handling
-   * - If conversationId provided: continue existing conversation
-   * - If no conversationId: create new conversation with model/provider
+   * Unified message handling.
+   * - If conversationId provided: continue the existing conversation (always persists).
+   * - If conversationId omitted + persist=true: create a new conversation and persist the exchange.
+   * - If conversationId omitted + persist falsy (default): stateless one-shot — no DB writes, no embedding.
    */
   async sendMessage(
     projectId: string,
@@ -46,11 +47,19 @@ export class ChatService {
       model?: string;
       provider?: string;
       conversationTitle?: string;
+      persist?: boolean;
     },
-  ): Promise<{ conversationId: string; message: ChatResponse }> {
+  ): Promise<{ conversationId: string | null; message: ChatResponse }> {
+    // stateless path: no conversation to continue, caller didn't ask for persistence
+    // skips conversation/message inserts + the embedding call on the assistant answer
+    if (!request.conversationId && !request.persist) {
+      const message = await this.agentService.query(projectId, request);
+      return { conversationId: null, message };
+    }
+
     let conversationId = request.conversationId;
 
-    // create new conversation if conversationId not provided
+    // persisted new conversation: caller wants history kept for follow-ups
     if (!conversationId) {
       if (!request.model || !request.provider) {
         throw new Error("model and provider are required when starting a new conversation");
@@ -65,7 +74,6 @@ export class ChatService {
       conversationId = conversation.id;
     }
 
-    // send message using conversation's model
     const message = await this.queryInConversation(projectId, conversationId, request);
 
     return {
