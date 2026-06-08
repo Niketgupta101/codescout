@@ -48,6 +48,8 @@ export async function bootstrap() {
       return callback(new Error(`Origin ${origin} not allowed by CORS`));
     },
     credentials: true,
+    // browser-based mcp clients must read the oauth challenge header to begin discovery
+    exposedHeaders: ["WWW-Authenticate"],
   });
 
   app.enableShutdownHooks();

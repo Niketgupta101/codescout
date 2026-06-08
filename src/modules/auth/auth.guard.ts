@@ -6,6 +6,11 @@ import { AuthService } from "./auth.service";
 import { RequestWithUser } from "./types/request-with-user.type";
 import { UserApiKeyService } from "../user-api-key/user-api-key.service";
 import { USER_API_KEY_PREFIX } from "../user-api-key/user-api-key.constants";
+import { MCP_ENDPOINT_PATH } from "src/app.constants";
+import { McpAuthService } from "../mcp-auth/mcp-auth.service";
+import { EnvService } from "../env/env.service";
+import { LocaleException } from "src/plugins/locale/nest/locale.exception";
+import { Response } from "express";
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -13,6 +18,8 @@ export class AuthGuard implements CanActivate {
     readonly reflector: Reflector,
     readonly authService: AuthService,
     readonly userApiKeyService: UserApiKeyService,
+    readonly mcpAuthService: McpAuthService,
+    readonly envService: EnvService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -28,6 +35,14 @@ export class AuthGuard implements CanActivate {
 
     // get bearer token from request
     const request = context.switchToHttp().getRequest<RequestWithUser>();
+
+    const normalizedPath = request.path.replace(/\/+$/, "");
+
+    // mcp clients authenticate with stytch oauth and expect an oauth challenge on failure, not the rest jwt flow
+    if (normalizedPath === MCP_ENDPOINT_PATH) {
+      return this._activateMcpRequest(context, request);
+    }
+
     const accessToken = getBearerToken(request);
     if (!accessToken) {
       throw new UnauthorizedException("Token not found in request");
@@ -43,5 +58,32 @@ export class AuthGuard implements CanActivate {
     request.user = user;
 
     return true;
+  }
+
+  async _activateMcpRequest(context: ExecutionContext, request: RequestWithUser): Promise<boolean> {
+    try {
+      const accessToken = getBearerToken(request);
+
+      if (!accessToken) {
+        throw LocaleException.unauthorized({ message: "module.mcp.missingAccessTokenError" });
+      }
+
+      request.user = await this.mcpAuthService.verifyToken({
+        accessToken,
+      });
+
+      return true;
+    } catch (error) {
+      // rfc 9728 challenge: tells the mcp client where to discover the authorization server and start the stytch login
+      const response = context.switchToHttp().getResponse<Response>();
+      const appPublicUrl = this.envService.get("APP_PUBLIC_URL");
+
+      response.setHeader(
+        "WWW-Authenticate",
+        `Bearer error="invalid_token", resource_metadata="${appPublicUrl}/.well-known/oauth-protected-resource"`,
+      );
+
+      throw error;
+    }
   }
 }

@@ -1,0 +1,75 @@
+<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Authorize code-chat</title>
+      <style>
+        html, body { height: 100%; margin: 0; }
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          padding: 24px;
+          box-sizing: border-box;
+          background: #f7f7f8;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        /* stop flexbox from shrinking the stytch card below its natural width */
+        stytch-ui, stytch-identity-provider {
+          flex: none;
+          width: 100%;
+          max-width: 400px;
+        }
+      </style>
+    </head>
+    <body>
+        <script type="module">
+            import { StytchUIClient, StytchUI, StytchIdentityProvider, Products } from "https://esm.sh/@stytch/vanilla-js@6";
+        
+            if (!customElements.get("stytch-ui")) customElements.define("stytch-ui", StytchUI);
+            if (!customElements.get("stytch-identity-provider")) customElements.define("stytch-identity-provider", StytchIdentityProvider);
+        
+            const { publicToken } = await fetch("/oauth/config").then((r) => r.json());
+            const client = new StytchUIClient(publicToken);
+
+            // the login redirect must use the bare, allow-listed consent url (stytch rejects redirect urls carrying query params)
+            const consentUrl = window.location.origin + "/oauth/consent";
+            const OAUTH_PARAMS_KEY = "codescout_oauth_params";
+
+            // stash the oauth authorization params (client_id, redirect_uri, scope, state, code_challenge) on first arrival
+            // localStorage (not sessionStorage) because the magic link may open in a new tab, which has its own session storage
+            if (new URLSearchParams(window.location.search).has("client_id")) {
+                localStorage.setItem(OAUTH_PARAMS_KEY, window.location.search);
+            }
+
+            // consume a magic-link / oauth token if we were redirected back here (clears the token params)
+            await client.authenticateByUrl({ sessionDurationMinutes: 60 }).catch(() => null);
+
+            if (!client.session.getSync()) {
+                const login = document.createElement("stytch-ui");
+                document.body.appendChild(login);
+                login.render({
+                client,
+                config: {
+                    products: [Products.emailMagicLinks, Products.oauth],
+                    emailMagicLinksOptions: { loginRedirectURL: consentUrl, signupRedirectURL: consentUrl },
+                    oauthOptions: { providers: [{ type: "google" }], loginRedirectURL: consentUrl, signupRedirectURL: consentUrl },
+                },
+                });
+            } else {
+                // restore the oauth params into the url so the consent component can read client_id etc.
+                const savedParams = localStorage.getItem(OAUTH_PARAMS_KEY);
+                if (savedParams && !new URLSearchParams(window.location.search).has("client_id")) {
+                    window.history.replaceState({}, "", consentUrl + savedParams);
+                }
+                localStorage.removeItem(OAUTH_PARAMS_KEY);
+
+                const idp = document.createElement("stytch-identity-provider");
+                document.body.appendChild(idp);
+                idp.render({ client });
+            }
+        </script>
+    </body>
+  </html>

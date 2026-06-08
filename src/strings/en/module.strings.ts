@@ -45,8 +45,13 @@ export const moduleStringsEn = {
     noFilesUploadedError: "No files uploaded",
   },
   mcp: {
-    missingAccessTokenError: "Authentication is required. Provide a JWT in the Authorization header or set MCP_AUTH_TOKEN.",
+    missingAccessTokenError: "Authentication is required. Connect via OAuth to obtain an access token.",
     missingProjectIdentifierError: "Either projectId or gitRemoteUrl must be provided.",
     projectNotFoundError: "Project not found or you do not have access to it.",
+    invalidAccessTokenError: "The provided access token is invalid. Please provide a valid authentication token.",
+    userNotProvisionedError: "Your user account has not been provisioned for access. Please contact an administrator.",
+  },
+  oauth: {
+    notConfiguredError: "OAuth is not configured. Please contact your administrator.",
   },
 };

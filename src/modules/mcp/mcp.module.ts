@@ -6,6 +6,9 @@ import { AuthModule } from "src/modules/auth/auth.module";
 import { PrismaModule } from "src/prisma/prisma.module";
 import { UserApiKeyModule } from "src/modules/user-api-key/user-api-key.module";
 import { McpActorService } from "./mcp-actor.service";
+import { StytchModule } from "../stytch/stytch.module";
+import { McpAuthService } from "../mcp-auth/mcp-auth.service";
+import { OAuthModule } from "../oauth/oauth.module";
 
 @Global()
 @Module({
@@ -46,8 +49,10 @@ import { McpActorService } from "./mcp-actor.service";
     AuthModule,
     PrismaModule,
     UserApiKeyModule,
+    StytchModule,
+    OAuthModule,
   ],
-  providers: [McpActorService],
-  exports: [McpActorService],
+  providers: [McpActorService, McpAuthService],
+  exports: [McpActorService, McpAuthService],
 })
 export class McpModule {}

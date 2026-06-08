@@ -63,12 +63,6 @@ export class EnvConfig {
   @IsString()
   ANTHROPIC_API_KEY: string;
 
-  // optional fallback access token for MCP stdio transport
-  // for HTTP+SSE the token is read from the Authorization header
-  @IsOptional()
-  @IsString()
-  MCP_AUTH_TOKEN?: string;
-
   @IsOptional()
   @IsNumber()
   AGENT_TIMEOUT_MS?: number;
@@ -78,4 +72,24 @@ export class EnvConfig {
   @IsOptional()
   @IsNumber()
   AGENT_MAX_OUTPUT_TOKENS?: number;
+
+  @IsOptional()
+  @IsString()
+  STYTCH_PROJECT_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  STYTCH_SECRET?: string;
+
+  // public token used by the browser consent page
+  @IsOptional()
+  @IsString()
+  STYTCH_PUBLIC_TOKEN?: string;
+
+  @IsOptional()
+  @IsString()
+  STYTCH_DOMAIN?: string;
+
+  @IsString()
+  APP_PUBLIC_URL: string;
 }
