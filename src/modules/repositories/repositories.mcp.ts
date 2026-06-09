@@ -1,12 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Tool, type Context } from "@rekog/mcp-nest";
-import { IndexingCostService } from "src/modules/indexing/indexing-cost.service";
 import { McpActorService } from "src/modules/mcp/mcp-actor.service";
 import { McpToolRequest } from "src/modules/mcp/types/mcp-tool-request.type";
-import {
-  RepositoryIndexCostEstimateInput,
-  RepositoryIndexCostEstimateSchema,
-} from "./dto/repository-index-cost-estimate.schema";
 import { RepositoryIndexInput, RepositoryIndexSchema } from "./dto/repository-index.schema";
 import { RepositoryListInput, RepositoryListSchema } from "./dto/repository-list.schema";
 import { RepositoryStatusGetInput, RepositoryStatusGetSchema } from "./dto/repository-status-get.schema";
@@ -18,7 +13,6 @@ export class RepositoriesMcp {
 
   constructor(
     readonly repositoriesService: RepositoriesService,
-    readonly indexingCostService: IndexingCostService,
     readonly mcpActorService: McpActorService,
   ) {}
 
@@ -65,27 +59,6 @@ export class RepositoriesMcp {
       includeTests: repositoryIndexInput.includeTests,
       authToken: repositoryIndexInput.authToken,
     });
-  }
-
-  @Tool({
-    name: "repositoryIndexCostEstimate",
-    description:
-      "Estimate the OpenAI cost of indexing a repository before committing to it. " +
-      "Clones the repo and tokenizes files locally - no DB writes, no LLM calls. " +
-      "Returns total files, token counts, and USD cost broken down by component. " +
-      "Use this before repositoryIndex on any repo where cost is a concern.",
-    parameters: RepositoryIndexCostEstimateSchema,
-  })
-  async repositoryIndexCostEstimate(
-    repositoryIndexCostEstimateInput: RepositoryIndexCostEstimateInput,
-    _context: Context,
-    request?: McpToolRequest,
-  ) {
-    await this.mcpActorService.actorResolve(request);
-
-    this.logger.log(`MCP repositoryIndexCostEstimate: url=${repositoryIndexCostEstimateInput.url}`);
-
-    return this.indexingCostService.repositoryIndexCostEstimate(repositoryIndexCostEstimateInput);
   }
 
   @Tool({
