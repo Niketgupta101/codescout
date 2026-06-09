@@ -55,7 +55,7 @@ export class MeService {
       }
 
       // /me endpoints run on JWT auth so actor.session is always present
-      // explicit guard keeps the type system honest after AuthUser.session became optional to support API-key auth
+      // explicit guard keeps the type system honest after AuthUser.session became optional to support mcp oauth auth
       if (!actor.session) {
         throw LocaleException.unauthorized();
       }

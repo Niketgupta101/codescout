@@ -49,7 +49,7 @@ export class StytchService {
 
     const user = await client.users.get({ user_id: claims.subject });
 
-    // only trust a verified email — an unverified one an attacker added to their stytch account must never match a db user
+    // only trust a verified email - an unverified one an attacker added to their stytch account must never match a db user
     const verifiedEmail = user.emails.find((email) => email.verified)?.email;
 
     if (!verifiedEmail) {

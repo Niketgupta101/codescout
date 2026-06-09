@@ -18,7 +18,7 @@ const APP_ROUTER_ROLE_BY_BASENAME: Record<string, NextJsFileRole> = {
 const RUNTIME_DIRECTIVE_LINE_BUDGET = 20;
 
 // looks at the file's path and content and returns next.js role + runtime if they apply
-// safe to call on any indexed file — non-next.js files just return an empty object
+// safe to call on any indexed file - non-next.js files just return an empty object
 export const detectNextJsFileMetadata = ({
   fullPath,
   rawContent,
@@ -50,7 +50,7 @@ const _detectRoleFromPath = (fullPath: string): NextJsFileRole | undefined => {
   const fileBasenameWithoutExtension = path.basename(fullPath, path.extname(fullPath)).toLowerCase();
   const segments = fullPath.split("/").filter(Boolean);
 
-  // root-level middleware.ts (or under a src/ wrapper) — not under app/ or pages/
+  // root-level middleware.ts (or under a src/ wrapper) - not under app/ or pages/
   // accept any depth as long as no app/ or pages/ segment dominates the path
   if (fileBasenameWithoutExtension === "middleware" && !segments.includes("app") && !segments.includes("pages")) {
     return "middleware";
@@ -74,7 +74,7 @@ const _detectRoleFromPath = (fullPath: string): NextJsFileRole | undefined => {
       return "route";
     }
 
-    // _app and _document are framework hooks, not user-facing pages — skip them so the role stays meaningful
+    // _app and _document are framework hooks, not user-facing pages - skip them so the role stays meaningful
     if (fileBasenameWithoutExtension === "_app" || fileBasenameWithoutExtension === "_document") {
       return undefined;
     }

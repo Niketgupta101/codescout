@@ -14,7 +14,7 @@ import { ChatService } from "./chat.service";
     AgentModule,
     OpenAIModule,
     forwardRef(() => ConversationsModule),
-    RekogMcpModule.forFeature([ChatMcp], "code-chat"),
+    RekogMcpModule.forFeature([ChatMcp], "codescout"),
   ],
   controllers: [ChatController],
   providers: [ChatService, ChatMcp],

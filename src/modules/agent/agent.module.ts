@@ -16,7 +16,7 @@ import { AgentService } from "./agent.service";
     OpenAIModule,
     LLMModule,
     forwardRef(() => ConversationsModule),
-    RekogMcpModule.forFeature([AgentMcp], "code-chat"),
+    RekogMcpModule.forFeature([AgentMcp], "codescout"),
   ],
   providers: [AgentToolsService, AgentService, AgentMcp],
   exports: [AgentService, AgentToolsService],

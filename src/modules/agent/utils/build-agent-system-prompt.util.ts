@@ -7,11 +7,11 @@ export type BuildAgentSystemPromptOptions = {
 const BASE_TOOL_DESCRIPTIONS = [
   "- search_symbols: PRIMARY for named symbols. Name-based lookup that ALSO returns the symbol's line range. Pass results straight into read_file_range.",
   "- read_file_range: PRIMARY for large-file reads (paired with search_symbols). Returns only the requested lines.",
-  "- read_file: returns the FULL file. Use only for small files (DTOs, types, controllers, READMEs) — wasteful on large services/routers.",
+  "- read_file: returns the FULL file. Use only for small files (DTOs, types, controllers, READMEs) - wasteful on large services/routers.",
   "- list_files: list files filtered by a case-insensitive substring of the full path. Check STRUCTURE in your project context FIRST; only call this if you need a flat filter the outline doesn't give you.",
   "- search_code: regex grep over file content. Use when you have a string/pattern but NO symbol name.",
   "- search_files: semantic search over file summaries. Use ONLY when the question is fuzzy/conceptual and you don't have a symbol name or path hint.",
-  "- get_directory: inspect ONE directory — returns its own summary + direct child files + direct child directories (with their summaries). Use to navigate by purpose without reading any file.",
+  "- get_directory: inspect ONE directory - returns its own summary + direct child files + direct child directories (with their summaries). Use to navigate by purpose without reading any file.",
 ];
 
 const CONVERSATION_TOOL_DESCRIPTION =
@@ -42,7 +42,7 @@ export const buildAgentSystemPrompt = ({
 Project ID: ${projectId}
 
 # Boundary
-Answer ONLY from files you have read with read_file or read_file_range. Never infer behavior from a file's name, summary, or directory. If you can't find evidence after a few attempts, say "I cannot find [feature] in this codebase" — don't guess.
+Answer ONLY from files you have read with read_file or read_file_range. Never infer behavior from a file's name, summary, or directory. If you can't find evidence after a few attempts, say "I cannot find [feature] in this codebase" - don't guess.
 
 # Pick the right tool combo BEFORE you start
 
@@ -57,17 +57,17 @@ Decide your tool sequence upfront from the question, not by trial and error. The
 | "high-level overview of the project" | use STRUCTURE + <project_context> directly; search_files docs if needed |
 
 Rules:
-- NEVER read_file a large service/router file just to find one function. Always go via search_symbols first — it returns line ranges that pair with read_file_range.
-- The STRUCTURE outline is already in your project context above — don't call get_file_tree unless STRUCTURE is empty.
+- NEVER read_file a large service/router file just to find one function. Always go via search_symbols first - it returns line ranges that pair with read_file_range.
+- The STRUCTURE outline is already in your project context above - don't call get_file_tree unless STRUCTURE is empty.
 - Be lazy. Most questions are answerable from 2-4 well-chosen tool calls. If you can answer from what you've read, STOP and answer.
-- Stay on scope. If reading a service shows it calls auditService / notificationService / analyticsService, NOTE that as a side-effect inline ("this also writes an audit log entry") and move on — don't dive into those unless the user explicitly asked about them.
+- Stay on scope. If reading a service shows it calls auditService / notificationService / analyticsService, NOTE that as a side-effect inline ("this also writes an audit log entry") and move on - don't dive into those unless the user explicitly asked about them.
 
 # Tools
 ${tools.join("\n")}
 
 ${conversationStrategySection}# Rules
 - Cite file paths in your findings. Every claim needs a file behind it.
-- Summaries are for discovery only — read the file before claiming anything about its behavior.
+- Summaries are for discovery only - read the file before claiming anything about its behavior.
 - If a file's content is already visible in your conversation context from an earlier tool result, reuse it instead of re-reading.
 - If 2-3 different lookups return nothing useful, stop and say "I cannot find [feature] in this codebase". Don't loop forever.
 `;

@@ -1,7 +1,7 @@
 import { IndexingDirectoryTreeNode } from "../types/indexing-directory-tree-node.type";
 
 // derives every distinct directory implied by a set of file paths
-// output is sorted by depth ascending then path so parents precede children — useful when inserting Directory rows under FK constraints
+// output is sorted by depth ascending then path so parents precede children - useful when inserting Directory rows under FK constraints
 export const buildDirectoryTreeFromCodeFilePaths = (codeFilePaths: string[]): IndexingDirectoryTreeNode[] => {
   const directoryFullPaths = new Set<string>();
 

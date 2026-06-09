@@ -7,7 +7,7 @@ const GOOGLE_PING_TIMEOUT_MS = 3_000;
 export class HealthService {
   readonly logger = new Logger(HealthService.name);
 
-  // confirms outbound HTTPS works at all — proxies "can the app reach openai/anthropic/github" without exercising those quota-limited APIs
+  // confirms outbound HTTPS works at all - proxies "can the app reach openai/anthropic/github" without exercising those quota-limited APIs
   // returns false on any failure (timeout, DNS, non-2xx) so the health endpoint can report "degraded"
   async pingGoogle(): Promise<boolean> {
     const abortController = new AbortController();

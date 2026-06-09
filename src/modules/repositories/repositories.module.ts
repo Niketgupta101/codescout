@@ -10,7 +10,7 @@ import { IndexingModule } from "../indexing/indexing.module";
   imports: [
     PrismaModule,
     forwardRef(() => IndexingModule),
-    RekogMcpModule.forFeature([RepositoriesMcp], "code-chat"),
+    RekogMcpModule.forFeature([RepositoriesMcp], "codescout"),
   ],
   controllers: [RepositoriesController],
   providers: [RepositoriesService, RepositoriesMcp],

@@ -41,9 +41,7 @@ export class IndexingCostService {
    * @param options - Same shape as repositoryIndex (url, branch, includeTests, authToken)
    * @returns Token counts and USD cost broken down by component
    */
-  async repositoryIndexCostEstimate(
-    options: RepositoryIndexCostEstimateOptions,
-  ): Promise<RepositoryIndexCostEstimate> {
+  async repositoryIndexCostEstimate(options: RepositoryIndexCostEstimateOptions): Promise<RepositoryIndexCostEstimate> {
     const { url, branch = "main", includeTests = false, authToken } = options;
     const startTime = Date.now();
 
@@ -64,7 +62,8 @@ export class IndexingCostService {
       let acceptedFiles = 0;
 
       for (const file of files) {
-        const promptText = SUMMARY_SYSTEM_PROMPT + this.openaiService._buildSummaryPrompt(file.language, file.path, file.content);
+        const promptText =
+          SUMMARY_SYSTEM_PROMPT + this.openaiService._buildSummaryPrompt(file.language, file.path, file.content);
         const tokenCount = encode(promptText).length;
 
         if (tokenCount > MAX_INPUT_TOKENS_PER_FILE) {
@@ -87,7 +86,7 @@ export class IndexingCostService {
       const summaryOutputEstimated = acceptedFiles * EXPECTED_SUMMARY_OUTPUT_TOKENS;
       const embeddingInputEstimated = acceptedFiles * EXPECTED_EMBEDDING_INPUT_TOKENS;
 
-      // directory-tree extraction mirrors what real indexing will do — every distinct directory becomes one summarization call
+      // directory-tree extraction mirrors what real indexing will do - every distinct directory becomes one summarization call
       const directoryTreeNodes = buildDirectoryTreeFromCodeFilePaths(files.map((file) => file.path));
       const totalDirectories = directoryTreeNodes.length;
 
@@ -110,7 +109,8 @@ export class IndexingCostService {
         tokensToUsd(projectSummaryInputEstimated, SUMMARY_INPUT_PER_MILLION) +
         tokensToUsd(projectSummaryOutputEstimated, SUMMARY_OUTPUT_PER_MILLION);
 
-      const totalCost = summaryInputCost + summaryOutputCost + embeddingCost + directorySummaryCost + projectSummaryCost;
+      const totalCost =
+        summaryInputCost + summaryOutputCost + embeddingCost + directorySummaryCost + projectSummaryCost;
 
       const durationMs = Date.now() - startTime;
       this.logger.log(
@@ -150,7 +150,7 @@ export class IndexingCostService {
         notes: [
           `File summary input tokens are exact (counted via gpt-tokenizer o200k_base, the encoding used by ${SUMMARY_MODEL}).`,
           `File summary output tokens are estimated at ${EXPECTED_SUMMARY_OUTPUT_TOKENS} per file based on the "under 300 words" prompt; actual ±20%.`,
-          `Embedding input is the summary text — same estimate as summary output.`,
+          `Embedding input is the summary text - same estimate as summary output.`,
           `Directory summary cost is estimated from directory count × average input/output token expectations; real input depends on how many files/children each directory has.`,
           `Project summary cost is one call's worth of tokens regardless of repo size.`,
           `Files exceeding ${MAX_INPUT_TOKENS_PER_FILE.toLocaleString()} tokens are skipped during real indexing too.`,

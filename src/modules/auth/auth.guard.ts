@@ -4,8 +4,6 @@ import { IS_PUBLIC_KEY } from "./decorators/public.decorator";
 import { getBearerToken } from "./auth.util";
 import { AuthService } from "./auth.service";
 import { RequestWithUser } from "./types/request-with-user.type";
-import { UserApiKeyService } from "../user-api-key/user-api-key.service";
-import { USER_API_KEY_PREFIX } from "../user-api-key/user-api-key.constants";
 import { MCP_ENDPOINT_PATH } from "src/app.constants";
 import { McpAuthService } from "../mcp-auth/mcp-auth.service";
 import { EnvService } from "../env/env.service";
@@ -17,7 +15,6 @@ export class AuthGuard implements CanActivate {
   constructor(
     readonly reflector: Reflector,
     readonly authService: AuthService,
-    readonly userApiKeyService: UserApiKeyService,
     readonly mcpAuthService: McpAuthService,
     readonly envService: EnvService,
   ) {}
@@ -48,14 +45,8 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException("Token not found in request");
     }
 
-    // long-lived API keys carry the cck_ brand prefix; everything else is treated as a JWT
-    // both paths return AuthUser; api-key auth leaves session undefined and is rejected by /me-style endpoints
-    const user = accessToken.startsWith(USER_API_KEY_PREFIX)
-      ? await this.userApiKeyService.userFindByApiKey(accessToken)
-      : await this.authService.verifySession({ accessToken });
-
-    // set user in request
-    request.user = user;
+    // rest endpoints authenticate with an app jwt
+    request.user = await this.authService.verifySession({ accessToken });
 
     return true;
   }

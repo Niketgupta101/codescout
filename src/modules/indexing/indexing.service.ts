@@ -29,7 +29,7 @@ const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   type: SymbolType.type,
   enum: SymbolType.enum,
   method: SymbolType.function,
-  // arrow functions come out of the parser as their own chunkType — without this mapping every `const x = () => ...` export was getting dropped at the indexer stage
+  // arrow functions come out of the parser as their own chunkType - without this mapping every `const x = () => ...` export was getting dropped at the indexer stage
   "arrow-function": SymbolType.function,
   // emitted for non-function constants (object literals, array literals, CallExpression results like axios.create(...), styled.div`...` defaults that don't tie to an inner identifier)
   variable: SymbolType.variable,
@@ -446,7 +446,7 @@ export class IndexingService {
       // extract section-level symbols
       const metadata = section.metadata ?? {};
 
-      // epic name (CSV) — domain lookup for user-story projects, distinct from markdown headings
+      // epic name (CSV) - domain lookup for user-story projects, distinct from markdown headings
       const epicName = metadata.epicName;
       if (epicName && typeof epicName === "string") {
         await this.prisma.symbol.create({
@@ -460,14 +460,14 @@ export class IndexingService {
         count++;
       }
 
-      // markdown headings are intentionally NOT emitted as symbols — codeFileSearch over file summaries handles "find docs about X" better than keyword lookup over heading text
+      // markdown headings are intentionally NOT emitted as symbols - codeFileSearch over file summaries handles "find docs about X" better than keyword lookup over heading text
 
       // extract chunk-level symbols
       const chunks = section.chunks ?? [];
       for (const chunk of chunks) {
         const chunkMetadata = chunk.metadata ?? {};
 
-        // story ID (CSV) — domain lookup for user-story projects
+        // story ID (CSV) - domain lookup for user-story projects
         const storyId = chunkMetadata.storyId;
         if (storyId && typeof storyId === "string") {
           await this.prisma.symbol.create({
@@ -488,18 +488,14 @@ export class IndexingService {
           count += await this._extractCodeSymbols(projectId, codeFileId, chunkMetadata);
         }
 
-        // markdown keyword terms are intentionally NOT emitted — extracted top-5 keywords were stopwords ("for", "see", "github") that polluted symbolSearch results
+        // markdown keyword terms are intentionally NOT emitted - extracted top-5 keywords were stopwords ("for", "see", "github") that polluted symbolSearch results
       }
     }
 
     return count;
   }
 
-  async _extractCodeSymbols(
-    projectId: string,
-    codeFileId: string,
-    metadata: Record<string, unknown>,
-  ): Promise<number> {
+  async _extractCodeSymbols(projectId: string, codeFileId: string, metadata: Record<string, unknown>): Promise<number> {
     const chunkType = typeof metadata.chunkType === "string" ? metadata.chunkType : undefined;
     const name = typeof metadata.name === "string" ? metadata.name : undefined;
 
@@ -527,7 +523,7 @@ export class IndexingService {
       },
     });
 
-    // parent-class shortcut rows are intentionally NOT emitted — the class declaration walk already produces a class row with a real line range
+    // parent-class shortcut rows are intentionally NOT emitted - the class declaration walk already produces a class row with a real line range
     return 1;
   }
 
@@ -566,7 +562,7 @@ export class IndexingService {
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
 
-    // sub-minute durations don't need the leading "0m" — keep them compact
+    // sub-minute durations don't need the leading "0m" - keep them compact
     if (minutes > 0) {
       return `${minutes}m ${seconds % 60}s`;
     }
@@ -585,7 +581,7 @@ export class IndexingService {
       select: { id: true, fullPath: true, summary: true },
     });
 
-    // nothing to summarize on an empty project — leave Project.summary and Directory rows untouched
+    // nothing to summarize on an empty project - leave Project.summary and Directory rows untouched
     if (codeFiles.length === 0) {
       this.logger.log(`Skipping hierarchical summaries for empty project ${projectId}`);
       return;
@@ -659,7 +655,7 @@ export class IndexingService {
     for (const codeFile of codeFiles) {
       const containingDirectoryFullPath = findContainingDirectoryFullPath(codeFile.fullPath);
 
-      // file at project root has no containing directory — leave directoryId null
+      // file at project root has no containing directory - leave directoryId null
       // otherwise resolve to the upserted Directory row's id
       const directoryId = containingDirectoryFullPath
         ? (fullPathToDirectoryId.get(containingDirectoryFullPath) ?? null)
@@ -733,7 +729,7 @@ export class IndexingService {
               data: { summary },
             });
           } catch (error) {
-            // one failed directory shouldn't take down the whole pass — log and move on so other directories still get summarized
+            // one failed directory shouldn't take down the whole pass - log and move on so other directories still get summarized
             this.logger.error(`Failed to generate summary for directory ${directoryNode.fullPath}`, error);
           }
         }),
@@ -768,7 +764,7 @@ export class IndexingService {
     // skip the project-level call rather than feeding the LLM nothing
     if (topLevelDirectorySummaries.length === 0) {
       this.logger.warn(
-        `No top-level directory summaries available for project ${projectId} — skipping project summary`,
+        `No top-level directory summaries available for project ${projectId} - skipping project summary`,
       );
       return;
     }

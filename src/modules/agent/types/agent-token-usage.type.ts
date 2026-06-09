@@ -4,6 +4,6 @@ export type AgentTokenUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  // subset of promptTokens that came from the provider's prompt cache — useful for measuring cache effectiveness across iterations
+  // subset of promptTokens that came from the provider's prompt cache - useful for measuring cache effectiveness across iterations
   cachedPromptTokens: number;
 };

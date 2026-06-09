@@ -109,7 +109,7 @@ export class AgentToolsService {
         };
       }
 
-      // read_file returns the full file always; callers are expected to pick the right tool upfront — read_file for small files (DTOs, types, controllers), search_symbols + read_file_range for large ones (services, routers)
+      // read_file returns the full file always; callers are expected to pick the right tool upfront - read_file for small files (DTOs, types, controllers), search_symbols + read_file_range for large ones (services, routers)
       const totalLines = file.rawContent.split("\n").length;
 
       return {
@@ -140,13 +140,8 @@ export class AgentToolsService {
     try {
       this.logger.debug(`readFileRange(path=${filePath}, lines=${startLine}-${endLine})`);
 
-      // validate the requested range early — invalid input would silently produce empty or garbage output otherwise
-      if (
-        !Number.isInteger(startLine) ||
-        !Number.isInteger(endLine) ||
-        startLine < 1 ||
-        endLine < startLine
-      ) {
+      // validate the requested range early - invalid input would silently produce empty or garbage output otherwise
+      if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
         return {
           success: false,
           error: `Invalid line range: startLine=${startLine}, endLine=${endLine}. Must satisfy 1 <= startLine <= endLine.`,
@@ -176,7 +171,7 @@ export class AgentToolsService {
       const allLines = file.rawContent.split("\n");
       const totalLines = allLines.length;
 
-      // clamp end to file length — asking past EOF is fine, just return what exists
+      // clamp end to file length - asking past EOF is fine, just return what exists
       // separately, cap the range size at MAX_READ_FILE_LINES so a single call can't pull arbitrarily large spans
       const clampedEnd = Math.min(endLine, totalLines);
       const cappedEnd = Math.min(clampedEnd, startLine + MAX_READ_FILE_LINES - 1);
@@ -186,7 +181,7 @@ export class AgentToolsService {
       let content = returnedLines.join("\n");
 
       if (truncated) {
-        content += `\n\n[range capped at line ${cappedEnd} (${MAX_READ_FILE_LINES} max) — call read_file_range again with a later startLine to continue]`;
+        content += `\n\n[range capped at line ${cappedEnd} (${MAX_READ_FILE_LINES} max) - call read_file_range again with a later startLine to continue]`;
       }
 
       return {
@@ -219,7 +214,7 @@ export class AgentToolsService {
     try {
       this.logger.debug(`searchSymbols(name=${name}, type=${type ?? ""}, pathPattern=${pathPattern ?? ""})`);
 
-      // strip glob-style wildcards from the path filter — fullPath uses a substring match, so wildcards aren't meaningful
+      // strip glob-style wildcards from the path filter - fullPath uses a substring match, so wildcards aren't meaningful
       const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
       const symbols = await this.prisma.symbol.findMany({
@@ -258,7 +253,7 @@ export class AgentToolsService {
         take: 50,
       });
 
-      // single-project mode: do NOT attach projectSummary — it's already in the system prompt's project_context block
+      // single-project mode: do NOT attach projectSummary - it's already in the system prompt's project_context block
       const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
         projectId: symbol.project.id,
         projectName: symbol.project.name,
@@ -290,7 +285,7 @@ export class AgentToolsService {
     try {
       this.logger.debug(`searchCode(pattern=${pattern}, language=${language ?? ""}, pathPattern=${pathPattern ?? ""})`);
 
-      // strip glob-style wildcards from the path filter — fullPath uses a substring match, so wildcards aren't meaningful
+      // strip glob-style wildcards from the path filter - fullPath uses a substring match, so wildcards aren't meaningful
       const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
       const files = await this.prisma.codeFile.findMany({
@@ -441,7 +436,7 @@ export class AgentToolsService {
         orderBy: { fullPath: "asc" },
       });
 
-      // direct child files only — anything containing another "/" lives in a subdirectory, not at this level
+      // direct child files only - anything containing another "/" lives in a subdirectory, not at this level
       const directChildFiles = files.flatMap((file) => {
         const relativePath = file.fullPath.substring(normalizedPathWithSlash.length);
         if (relativePath.includes("/")) {
@@ -536,7 +531,7 @@ export class AgentToolsService {
         ...params,
       );
 
-      // single-project mode: do NOT attach projectSummary — it's already in the system prompt's project_context block
+      // single-project mode: do NOT attach projectSummary - it's already in the system prompt's project_context block
       const fileResults: FileSearchResult[] = results.map((r) => ({
         projectId: r.projectId,
         projectName: r.projectName,

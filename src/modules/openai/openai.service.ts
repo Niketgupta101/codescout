@@ -66,10 +66,7 @@ export class OpenAIService {
     return this._convertFromOpenAIResponse(response);
   }
 
-  _convertToOpenAIMessages(
-    messages: LLMMessage[],
-    systemPrompt?: string,
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+  _convertToOpenAIMessages(messages: LLMMessage[], systemPrompt?: string): OpenAI.Chat.ChatCompletionMessageParam[] {
     const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
     if (systemPrompt) {
@@ -329,7 +326,7 @@ Keep it under 250 words.`;
   }
 
   _buildSummaryPrompt(language: string, filePath: string, content: string): string {
-    // gpt-4o-mini handles 128K tokens of context — full file content is sent without truncation
+    // gpt-4o-mini handles 128K tokens of context - full file content is sent without truncation
     // pathologically large files are filtered upstream in the indexing pipeline
     if (language === "typescript" || language === "javascript" || language === "tsx" || language === "jsx") {
       const isReact = language === "tsx" || language === "jsx";

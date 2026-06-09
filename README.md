@@ -1,11 +1,11 @@
-# code-chat
+# codescout
 
-Agentic Q&A over your codebases and documentation. Index a GitHub repository or upload documents, then ask any MCP-capable LLM client (Claude Desktop, Claude Code, Cursor, …) questions about it. The server runs a multi-step research agent — semantic search + symbol lookup + targeted file reads — and returns grounded answers backed by file paths and line ranges.
+Agentic Q&A over your codebases and documentation. Index a GitHub repository or upload documents, then ask any MCP-capable LLM client (Claude Desktop, Claude Code, Cursor, …) questions about it. The server runs a multi-step research agent - semantic search + symbol lookup + targeted file reads - and returns grounded answers backed by file paths and line ranges.
 
 ## Use cases
 
 - Ask "how does X work" or "where is Y defined" inside Claude Desktop / Claude Code without switching tools
-- Cross-project discovery — "do we have rate limiting in any of our projects?"
+- Cross-project discovery - "do we have rate limiting in any of our projects?"
 - Ground LLM agents (Claude Code, Cursor) in your own indexed code instead of training data
 - Onboard new engineers with Q&A over the codebase and product docs in one place
 
@@ -17,17 +17,11 @@ Prerequisites: Node 18+, PostgreSQL 14+, OpenAI API key (Anthropic optional).
 
 ```bash
 git clone <repository-url>
-cd code-chat
+cd codescout
 yarn install
 ```
 
-Create `.env`:
-
-```bash
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/code_chat_dev?schema=public"
-OPENAI_API_KEY="sk-..."
-ANTHROPIC_API_KEY="sk-ant-..."   # optional, for Claude models
-```
+Create `.env`: refer .env.example file at root
 
 Apply migrations and start:
 
@@ -44,33 +38,17 @@ Create a project and index a repository or upload documents (Markdown / CSV / PD
 
 ### 3. Connect from an LLM client
 
-Generate an API key from your code-chat account. Copy the `cck_`-prefixed token — it isn't shown again.
+The MCP endpoint authenticates with OAuth 2.1 (Stytch as the authorization server). Clients discover the authorization server from the protected-resource metadata and run the login + consent flow themselves - no token to paste. Your Stytch-verified email must match an enabled user in the codescout database.
 
-**Claude Desktop.** The Add Custom Connector UI only accepts OAuth credentials, so configure via the JSON config file:
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "code-chat": {
-      "url": "https://<your-deploy>/mcp",
-      "headers": { "Authorization": "Bearer cck_..." }
-    }
-  }
-}
-```
-
-Restart Claude Desktop.
+**Claude Desktop / ChatGPT.** Add a custom connector with the URL `https://<your-deploy>/v1/mcp` and complete the OAuth login when prompted.
 
 **Claude Code:**
 
 ```bash
-claude mcp add code-chat https://<your-deploy>/mcp \
-  --transport http \
-  --header "Authorization: Bearer cck_..."
+claude mcp add codescout https://<your-deploy>/v1/mcp --transport http
 ```
+
+On first use the client opens the consent page, you sign in with Stytch, and the connection is authorized.
 
 ## License
 

@@ -13,7 +13,7 @@ export const formatProjectContextSection = ({
   maxDepth = DEFAULT_MAX_DEPTH,
   maxDirectoryEntries = DEFAULT_MAX_DIRECTORY_ENTRIES,
 }: AgentFormatProjectContextOptions): string => {
-  // nothing summarized yet — fall back to the baseline prompt rather than emitting a useless empty header
+  // nothing summarized yet - fall back to the baseline prompt rather than emitting a useless empty header
   if (!projectSummary && directories.length === 0) {
     return "";
   }

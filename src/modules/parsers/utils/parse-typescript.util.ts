@@ -104,14 +104,14 @@ const extractTypescriptStructures = (sourceFile: SourceFile, filePath: string): 
         continue;
       }
 
-      // primitives (strings, numbers, booleans) and identifier re-exports are intentionally not indexed — they'd add noise
+      // primitives (strings, numbers, booleans) and identifier re-exports are intentionally not indexed - they'd add noise
     }
   }
 
-  // default exports — handle four shapes:
+  // default exports - handle four shapes:
   //  a. export default () => <div />            (anonymous arrow/function literal)
   //  b. export default memo(() => <div />)      (HOC-wrapped anonymous function)
-  //  c. export default memo(Foo)                (HOC-wrapped named identifier — skipped because Foo was already extracted above)
+  //  c. export default memo(Foo)                (HOC-wrapped named identifier - skipped because Foo was already extracted above)
   //  d. export default styled.div`...`          (tagged template)
   for (const exportAssignment of sourceFile.getExportAssignments()) {
     // ignore CommonJS-style "export = X"; only handle "export default X"
@@ -184,7 +184,11 @@ const extractTypescriptClass = (classDecl: ClassDeclaration, sourceFile: SourceF
   };
 };
 
-const extractTypescriptMethod = (method: MethodDeclaration, sourceFile: SourceFile, parentClassName: string): ASTNode => {
+const extractTypescriptMethod = (
+  method: MethodDeclaration,
+  sourceFile: SourceFile,
+  parentClassName: string,
+): ASTNode => {
   const name = method.getName();
   const decorators = method.getDecorators().map((decorator) => decorator.getText());
   const isAsync = method.isAsync();
@@ -459,9 +463,7 @@ const extractTypescriptHocWrappedFunction = (
   const isExported = variableStatement ? variableStatement.isExported() : false;
   const isAsync = innerFunction.isAsync();
 
-  const parameters = innerFunction
-    .getParameters()
-    .map((param) => `${param.getName()}: ${param.getType().getText()}`);
+  const parameters = innerFunction.getParameters().map((param) => `${param.getName()}: ${param.getType().getText()}`);
   const returnType = innerFunction.getReturnType().getText();
 
   const jsDocComments = variableStatement ? variableStatement.getJsDocs() : [];
@@ -572,7 +574,7 @@ const extractTypescriptVariable = (declaration: VariableDeclaration, sourceFile:
   };
 };
 
-// CallExpression / TaggedTemplate default exports — when we can't statically tie the export to an already-extracted variable,
+// CallExpression / TaggedTemplate default exports - when we can't statically tie the export to an already-extracted variable,
 // synthesize a symbol from the filepath (same helper next.js anonymous-component default exports use)
 const extractTypescriptDefaultExportSynthesized = (
   exportAssignment: ExportAssignment,

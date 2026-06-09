@@ -38,7 +38,7 @@ export class ChatService {
    * Unified message handling.
    * - If conversationId provided: continue the existing conversation (always persists).
    * - If conversationId omitted + persist=true: create a new conversation and persist the exchange.
-   * - If conversationId omitted + persist falsy (default): stateless one-shot — no DB writes, no embedding.
+   * - If conversationId omitted + persist falsy (default): stateless one-shot - no DB writes, no embedding.
    */
   async sendMessage(
     projectId: string,

@@ -43,12 +43,16 @@ export class AnthropicService {
 
     const callerTools = options.tools ? this._convertToAnthropicTools(options.tools) : [];
 
-    // structured output and caller tools are mutually exclusive in our usage — _generateAnswer never passes its own tools alongside responseFormat
+    // structured output and caller tools are mutually exclusive in our usage - _generateAnswer never passes its own tools alongside responseFormat
     // if both are ever needed at once, the caller would need to drop the structured-output guarantee or build a tool that wraps everything
-    const anthropicTools = structuredOutputTool ? [structuredOutputTool] : callerTools.length > 0 ? callerTools : undefined;
+    const anthropicTools = structuredOutputTool
+      ? [structuredOutputTool]
+      : callerTools.length > 0
+        ? callerTools
+        : undefined;
 
     // mark the system prompt as a cache breakpoint so anthropic caches it (and the tools array, which sits before it in the prefix)
-    // ttl "1h" extends the cache lifetime from the default 5m to 1h — write costs ~2x vs ~1.25x for 5m, but reads stay the same
+    // ttl "1h" extends the cache lifetime from the default 5m to 1h - write costs ~2x vs ~1.25x for 5m, but reads stay the same
     // 1h matches realistic user pacing on multi-turn conversations (humans pause minutes between questions); 5m default missed the cache constantly in production
     // when the prompt is below ~1024 tokens anthropic ignores the marker, so this is safe even for short prompts
     const systemWithCacheControl: Anthropic.TextBlockParam[] | undefined = options.systemPrompt
@@ -62,7 +66,7 @@ export class AnthropicService {
       system: systemWithCacheControl,
       messages: anthropicMessages,
       tools: anthropicTools,
-      // forcing tool_choice ensures Claude must call the structured-output tool — it cannot return free text
+      // forcing tool_choice ensures Claude must call the structured-output tool - it cannot return free text
       ...(structuredOutputTool ? { tool_choice: { type: "tool", name: structuredOutputTool.name } } : {}),
     });
 
@@ -92,7 +96,7 @@ export class AnthropicService {
     return {
       id: response.id,
       content: JSON.stringify(toolUseBlock.input),
-      // structured output is forced via tool_choice — "max_tokens" here means the tool's input json was truncated mid-generation, so JSON.parse will fail downstream
+      // structured output is forced via tool_choice - "max_tokens" here means the tool's input json was truncated mid-generation, so JSON.parse will fail downstream
       // surfacing it as "length" lets the agent service warn before the parse failure obscures the cause
       finishReason: response.stop_reason === "max_tokens" ? "length" : "stop",
       usage: {

@@ -1,7 +1,7 @@
 export type SymbolInfo = {
   projectId: string;
   projectName: string;
-  // populated only in cross-project mode — single-project chats already have project summary in the system prompt
+  // populated only in cross-project mode - single-project chats already have project summary in the system prompt
   projectSummary?: string;
   // summary of the containing directory, when the symbol's file is in one and the directory has been summarized
   directorySummary?: string;

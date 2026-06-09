@@ -8,7 +8,7 @@ import { AgentModule } from "../agent/agent.module";
 import { ChatModule } from "../chat/chat.module";
 
 @Module({
-  imports: [PrismaModule, AgentModule, ChatModule, RekogMcpModule.forFeature([ProjectsMcp], "code-chat")],
+  imports: [PrismaModule, AgentModule, ChatModule, RekogMcpModule.forFeature([ProjectsMcp], "codescout")],
   controllers: [ProjectsController],
   providers: [ProjectService, ProjectsMcp],
   exports: [ProjectService],

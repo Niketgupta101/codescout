@@ -2,16 +2,7 @@ import * as path from "path";
 
 // next.js role-bearing filenames: when a file is named one of these, its parent directory carries the meaningful name
 // adding the role as a suffix preserves intent ("UsersPage" reads better than "Page" alone)
-const NEXT_JS_ROLE_FILE_BASENAMES = [
-  "page",
-  "layout",
-  "route",
-  "loading",
-  "error",
-  "not-found",
-  "template",
-  "default",
-];
+const NEXT_JS_ROLE_FILE_BASENAMES = ["page", "layout", "route", "loading", "error", "not-found", "template", "default"];
 
 const INDEX_FILE_BASENAMES = ["index"];
 
@@ -27,7 +18,7 @@ export const deriveDefaultExportSymbolName = (filePath: string): string => {
   if (NEXT_JS_ROLE_FILE_BASENAMES.includes(fileBasenameLower)) {
     const cleanedParent = stripDynamicSegmentBrackets(parentDirectoryName);
 
-    // empty or root parent (e.g. "page.tsx" at repo root) — fall back to just the role name
+    // empty or root parent (e.g. "page.tsx" at repo root) - fall back to just the role name
     if (!cleanedParent || cleanedParent === "." || cleanedParent === "") {
       return toPascalCase(fileBasenameWithoutExtension);
     }

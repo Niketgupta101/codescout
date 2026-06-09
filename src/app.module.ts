@@ -29,7 +29,6 @@ import { AppLogger } from "./providers/app-logger.service";
 import { HealthModule } from "./modules/health/health.module";
 import { MeModule } from "./modules/me/me.module";
 import { UserModule } from "./modules/user/user.module";
-import { UserApiKeyModule } from "./modules/user-api-key/user-api-key.module";
 import { AccessModule } from "./libraries/access";
 import { AppAbilityModule } from "./app-ability/app-ability.module";
 import { AppAbilityFactory } from "./app-ability/app-ability.factory";
@@ -65,7 +64,6 @@ import { RequestWithUser } from "./modules/auth/types/request-with-user.type";
     HealthModule,
     MeModule,
     UserModule,
-    UserApiKeyModule,
     ProjectsModule,
     GithubModule,
     RepositoriesModule,

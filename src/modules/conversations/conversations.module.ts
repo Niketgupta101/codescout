@@ -7,7 +7,7 @@ import { PrismaModule } from "../../prisma/prisma.module";
 import { OpenAIModule } from "../openai/openai.module";
 
 @Module({
-  imports: [PrismaModule, OpenAIModule, RekogMcpModule.forFeature([ConversationsMcp], "code-chat")],
+  imports: [PrismaModule, OpenAIModule, RekogMcpModule.forFeature([ConversationsMcp], "codescout")],
   controllers: [ConversationsController],
   providers: [ConversationsService, ConversationsMcp],
   exports: [ConversationsService],

@@ -181,7 +181,7 @@ export class ConversationsService {
     const totalMessages = messages.length;
 
     // keep tool_call payloads only for the most recent turn (1 user + 1 assistant = 2 db messages)
-    // older turns get reduced to plain assistant text — tool results carry whole file contents and bloat the prompt by 10-20x
+    // older turns get reduced to plain assistant text - tool results carry whole file contents and bloat the prompt by 10-20x
     // tradeoff: agent loses access to "what tools did I previously call" beyond the most recent turn; the prior answer text still summarizes findings
     const RECENT_TURN_DB_MESSAGE_COUNT = 2;
 

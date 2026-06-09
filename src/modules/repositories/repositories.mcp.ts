@@ -71,7 +71,7 @@ export class RepositoriesMcp {
     name: "repositoryIndexCostEstimate",
     description:
       "Estimate the OpenAI cost of indexing a repository before committing to it. " +
-      "Clones the repo and tokenizes files locally — no DB writes, no LLM calls. " +
+      "Clones the repo and tokenizes files locally - no DB writes, no LLM calls. " +
       "Returns total files, token counts, and USD cost broken down by component. " +
       "Use this before repositoryIndex on any repo where cost is a concern.",
     parameters: RepositoryIndexCostEstimateSchema,

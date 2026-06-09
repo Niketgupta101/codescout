@@ -28,14 +28,11 @@ void (async () => {
   });
 
   const config = new DocumentBuilder()
-    .setTitle("Code Chat API")
-    .setDescription("Code Chat REST API — projects, indexing, repositories, documents, conversations, messages")
+    .setTitle("Codescout API")
+    .setDescription("Codescout REST API - projects, indexing, repositories, documents, conversations, messages")
     .setVersion("1.0")
     .addServer("http://localhost:4000", "Local dev")
-    .addBearerAuth(
-      { type: "http", scheme: "bearer", bearerFormat: "JWT", in: "header" },
-      "bearer",
-    )
+    .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT", in: "header" }, "bearer")
     .addSecurityRequirements("bearer")
     .build();
 

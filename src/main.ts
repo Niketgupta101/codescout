@@ -79,8 +79,8 @@ export async function bootstrap() {
 
     // setup openapi docs
     const config = new DocumentBuilder()
-      .setTitle("Code Chat API")
-      .setDescription("Code Chat API endpoints")
+      .setTitle("Codescout API")
+      .setDescription("Codescout API endpoints")
       .setVersion("1.0")
       .addBearerAuth()
       .addSecurityRequirements("bearer")

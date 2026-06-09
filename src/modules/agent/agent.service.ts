@@ -49,12 +49,12 @@ export class AgentService {
 
   // resolves max output tokens per LLM call: env override > 16384 default
   // 16384 is the safe ceiling across providers we support (sonnet 4.5 supports 64k but openai gpt-4o family caps at 16k)
-  // max_tokens is a cap not a charge, so bumping it has no cost — only api errors when the value exceeds the model's hard limit
+  // max_tokens is a cap not a charge, so bumping it has no cost - only api errors when the value exceeds the model's hard limit
   _resolveMaxOutputTokens(): number {
     return this.envService.get("AGENT_MAX_OUTPUT_TOKENS") ?? 16384;
   }
 
-  // emits a warning when the LLM stopped because it hit max_tokens — that means the answer was clipped and the user got an incomplete response
+  // emits a warning when the LLM stopped because it hit max_tokens - that means the answer was clipped and the user got an incomplete response
   // raise AGENT_MAX_OUTPUT_TOKENS in env vars to fix
   _warnIfTruncated(
     stage: "research" | "answer-generation" | "forced-final-synthesis",
@@ -63,7 +63,7 @@ export class AgentService {
   ): void {
     if (finishReason === "length") {
       this.logger.warn(
-        `LLM ${stage} response truncated at ${maxOutputTokens} output tokens — raise AGENT_MAX_OUTPUT_TOKENS to fix`,
+        `LLM ${stage} response truncated at ${maxOutputTokens} output tokens - raise AGENT_MAX_OUTPUT_TOKENS to fix`,
       );
     }
   }
@@ -141,7 +141,7 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
-        // execute tool calls in parallel — independent reads/searches don't need to wait on each other
+        // execute tool calls in parallel - independent reads/searches don't need to wait on each other
         // Promise.all preserves array order so the resolved bundles line up with the LLM's original tool_calls order
         const executedToolCallBundles = await this._executeToolCallsInParallel({
           projectId,
@@ -163,7 +163,7 @@ export class AgentService {
 
           toolCallIdsForThisIteration.push(bundle.toolCallId);
 
-          // add tool result to messages — must stay in original order so the LLM sees them in the order it asked
+          // add tool result to messages - must stay in original order so the LLM sees them in the order it asked
           messages.push({
             role: "tool",
             toolResult: {
@@ -312,7 +312,7 @@ export class AgentService {
       if (response.toolCalls && response.toolCalls.length > 0) {
         this.logger.debug(`LLM requested ${response.toolCalls.length} tool calls`);
 
-        // execute tool calls in parallel — independent reads/searches don't need to wait on each other
+        // execute tool calls in parallel - independent reads/searches don't need to wait on each other
         // Promise.all preserves array order so the resolved bundles line up with the LLM's original tool_calls order
         const executedToolCallBundles = await this._executeToolCallsInParallel({
           projectId,
@@ -334,7 +334,7 @@ export class AgentService {
 
           toolCallIdsForThisIteration.push(bundle.toolCallId);
 
-          // add tool result to messages — must stay in original order so the LLM sees them in the order it asked
+          // add tool result to messages - must stay in original order so the LLM sees them in the order it asked
           messages.push({
             role: "tool",
             toolResult: {
@@ -404,7 +404,7 @@ export class AgentService {
     });
   }
 
-  // called when the tool-call loop runs out of iterations without the LLM voluntarily ending — sends one more LLM call with no tools so the model has to synthesize a final answer from the findings it already has
+  // called when the tool-call loop runs out of iterations without the LLM voluntarily ending - sends one more LLM call with no tools so the model has to synthesize a final answer from the findings it already has
   async _forceFinalAnswerAfterBudgetExhaustion({
     query,
     messages,
@@ -433,7 +433,7 @@ export class AgentService {
     model: string;
   }): Promise<AgentResponse> {
     this.logger.warn(
-      `Max iterations (${maxIterations}) reached — forcing final synthesis with tools disabled rather than throwing`,
+      `Max iterations (${maxIterations}) reached - forcing final synthesis with tools disabled rather than throwing`,
     );
 
     // append a user-side instruction to synthesize from what's already been gathered; calling the LLM without `tools` removes the option of issuing more tool calls
@@ -509,12 +509,12 @@ export class AgentService {
       select: { name: true, summary: true },
     });
 
-    // project deleted or never existed — return an empty shape so the formatter renders nothing instead of throwing
+    // project deleted or never existed - return an empty shape so the formatter renders nothing instead of throwing
     if (!project) {
       return { projectName: "", projectSummary: null, directories: [] };
     }
 
-    // depth cap is enforced at query time so the formatter doesn't have to filter — keeps the prompt size bounded
+    // depth cap is enforced at query time so the formatter doesn't have to filter - keeps the prompt size bounded
     // ordering by depth then path makes the formatted tree natural to read top-down
     const directories = await this.prisma.directory.findMany({
       where: { projectId, depth: { lte: 3 } },
@@ -533,7 +533,7 @@ export class AgentService {
   // assembles the public AgentResponse and computes totalUsage from the loop's iterations + the answer-generation call
   // separated so both query() and queryWithContext() return the same shape with no duplicated math
   // decides whether to run the post-research formatter or return raw findings directly
-  // raw-findings mode exists for agentic callers (MCP) where the calling LLM will reformat anyway — running _generateAnswer for them duplicates work
+  // raw-findings mode exists for agentic callers (MCP) where the calling LLM will reformat anyway - running _generateAnswer for them duplicates work
   async _finalizeAgentRun({
     query,
     researchContent,
@@ -558,7 +558,7 @@ export class AgentService {
     iterationsUsage: AgentIterationUsage[];
   }): Promise<AgentResponse> {
     if (skipAnswerFormatting) {
-      this.logger.log(`Skipping _generateAnswer (skipAnswerFormatting=true) — returning raw research findings`);
+      this.logger.log(`Skipping _generateAnswer (skipAnswerFormatting=true) - returning raw research findings`);
 
       return this._buildAgentResponse({
         answer: researchContent,
@@ -731,7 +731,7 @@ Answer the question based on these findings:`,
         throw new Error("No response from LLM");
       }
 
-      // anthropic's tool_use input_schema is a hint, not strictly enforced — claude can return arrays as strings, drop fields, etc.
+      // anthropic's tool_use input_schema is a hint, not strictly enforced - claude can return arrays as strings, drop fields, etc.
       // validating + coercing here means a malformed shape produces a usable answer instead of crashing the whole agent run
       const parsedAnswer = this._parseAndCoerceAgentLLMAnswer(response.content);
 
@@ -927,7 +927,7 @@ Answer the question based on these findings:`,
         return this.tools.getDirectory(projectId, args.path as string);
 
       case "search_files": {
-        // coerce documentTypes to string[] — some models still send a single string despite the array schema; wrap defensively so .join() etc. don't blow up
+        // coerce documentTypes to string[] - some models still send a single string despite the array schema; wrap defensively so .join() etc. don't blow up
         const rawDocumentTypes = args.documentTypes;
         const documentTypes = Array.isArray(rawDocumentTypes)
           ? (rawDocumentTypes as string[])
@@ -939,7 +939,7 @@ Answer the question based on these findings:`,
           projectId,
           args.query as string,
           documentTypes,
-          // coerce in case the model returns topK as a string despite the schema declaring number — `as` is a type assertion only, not a runtime cast
+          // coerce in case the model returns topK as a string despite the schema declaring number - `as` is a type assertion only, not a runtime cast
           args.topK !== undefined ? Number(args.topK) : undefined,
         );
       }
@@ -975,7 +975,7 @@ Answer the question based on these findings:`,
         name: "list_files",
         description:
           "List files in the project, optionally filtered by a case-insensitive substring match on the full path. Use to locate files when the resource name is in the question (e.g. pathPattern='order' to find every order-related file). " +
-          "Note: a project STRUCTURE outline is already provided in the system prompt — check that first; only call list_files when you need a flat file list or a path-pattern filter the outline doesn't give you.",
+          "Note: a project STRUCTURE outline is already provided in the system prompt - check that first; only call list_files when you need a flat file list or a path-pattern filter the outline doesn't give you.",
         parameters: {
           pathPattern: {
             type: "string",
@@ -989,7 +989,7 @@ Answer the question based on these findings:`,
         description:
           "Read the full content of a file. Returns the entire file regardless of size. " +
           "USE FOR small files where you want everything: controllers, DTOs, type definitions, READMEs, module files (typically <500 lines). " +
-          "DO NOT USE FOR large service/router/aggregator files (e.g. order.service.ts at 3000 lines) when you only want one function — that's wasteful. " +
+          "DO NOT USE FOR large service/router/aggregator files (e.g. order.service.ts at 3000 lines) when you only want one function - that's wasteful. " +
           "For those, pair search_symbols with read_file_range instead.",
         parameters: {
           filePath: {
@@ -1003,7 +1003,7 @@ Answer the question based on these findings:`,
         name: "read_file_range",
         description:
           "Read a specific line range of a file. Returns only the requested lines (1-indexed, inclusive). Range size capped at 1500 lines per call. " +
-          "PRIMARY TOOL for large files when paired with search_symbols: if search_symbols returned startLine/endLine for the symbol you want, call read_file_range with those numbers directly — DO NOT call read_file first.",
+          "PRIMARY TOOL for large files when paired with search_symbols: if search_symbols returned startLine/endLine for the symbol you want, call read_file_range with those numbers directly - DO NOT call read_file first.",
         parameters: {
           filePath: {
             type: "string",
@@ -1025,7 +1025,7 @@ Answer the question based on these findings:`,
         description:
           "PRIMARY ENTRY POINT for any named symbol (function, class, method, type, enum). " +
           "Case-insensitive partial match on the symbol name. Returns name + type + file path + 1-indexed inclusive line range (startLine/endLine, when known). " +
-          "The returned line range is meant to be passed straight to read_file_range — that's the canonical pair (search_symbols → read_file_range). " +
+          "The returned line range is meant to be passed straight to read_file_range - that's the canonical pair (search_symbols → read_file_range). " +
           "Scope with pathPattern (e.g. pathPattern='order.service') when the same symbol name exists in many files.",
         parameters: {
           name: {
@@ -1071,14 +1071,14 @@ Answer the question based on these findings:`,
         name: "get_file_tree",
         description:
           "Get the hierarchical folder/file structure of the project. " +
-          "AVOID calling this redundantly: a STRUCTURE outline is already in the system prompt's project context block — check there first. Only call this when STRUCTURE is empty or you need a depth the outline doesn't show.",
+          "AVOID calling this redundantly: a STRUCTURE outline is already in the system prompt's project context block - check there first. Only call this when STRUCTURE is empty or you need a depth the outline doesn't show.",
         parameters: {},
       },
       {
         name: "get_directory",
         description:
           "Inspect a single directory: returns the directory's own summary (when indexed), the direct child FILES, and the direct child DIRECTORIES with their summaries. " +
-          "Useful as a one-shot 'what's in here?' — child-directory summaries let you decide where to drill next without reading any file. " +
+          "Useful as a one-shot 'what's in here?' - child-directory summaries let you decide where to drill next without reading any file. " +
           "Prefer this over list_files when you want to navigate the hierarchy by purpose; use list_files when you only need a flat file list.",
         parameters: {
           path: {
@@ -1106,7 +1106,8 @@ Answer the question based on these findings:`,
           },
           topK: {
             type: "number",
-            description: "Number of results to return (default: 3). Raise to 5-8 only when the first batch is clearly insufficient.",
+            description:
+              "Number of results to return (default: 3). Raise to 5-8 only when the first batch is clearly insufficient.",
           },
         },
         required: ["query"],
