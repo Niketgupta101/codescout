@@ -63,10 +63,10 @@ export class ProjectService {
     const project = await this.findOne(projectId); // ensure resource exists
 
     await this.prisma.$transaction([
-      this.prisma.codeFile.deleteMany({ where: { projectId } }),
-      this.prisma.symbol.deleteMany({ where: { projectId } }),
+      this.prisma.repositoryFile.deleteMany({ where: { projectId } }),
+      this.prisma.repositoryFileSymbol.deleteMany({ where: { projectId } }),
       this.prisma.repository.deleteMany({ where: { projectId } }),
-      this.prisma.document.deleteMany({ where: { projectId } }),
+      this.prisma.projectDocument.deleteMany({ where: { projectId } }),
       this.prisma.conversation.deleteMany({ where: { projectId } }),
       this.prisma.project.delete({ where: { id: projectId } }),
     ]);

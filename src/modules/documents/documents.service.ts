@@ -20,7 +20,7 @@ export class DocumentsService {
   ) {}
 
   async create(dto: CreateDocumentDto) {
-    return this.prisma.document.create({
+    return this.prisma.projectDocument.create({
       data: {
         projectId: dto.projectId,
         filename: dto.filename,
@@ -95,7 +95,7 @@ export class DocumentsService {
   }
 
   async findByProject(projectId: string) {
-    const documents = await this.prisma.document.findMany({
+    const documents = await this.prisma.projectDocument.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
     });
@@ -107,7 +107,7 @@ export class DocumentsService {
   }
 
   async findOne(projectId: string, documentId: string) {
-    const document = await this.prisma.document.findFirst({
+    const document = await this.prisma.projectDocument.findFirst({
       where: {
         id: documentId,
         projectId,
@@ -122,7 +122,7 @@ export class DocumentsService {
   }
 
   async updateStatus(documentId: string, dto: UpdateDocumentStatusDto) {
-    return this.prisma.document.update({
+    return this.prisma.projectDocument.update({
       where: { id: documentId },
       data: {
         status: dto.status,
@@ -135,7 +135,7 @@ export class DocumentsService {
   async delete(projectId: string, documentId: string) {
     const document = await this.findOne(projectId, documentId);
 
-    await this.prisma.document.delete({
+    await this.prisma.projectDocument.delete({
       where: { id: document.id },
     });
 

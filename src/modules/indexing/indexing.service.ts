@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ParsersService } from "../parsers/parsers.service";
 import { calculateChecksum } from "./utils/checksum.util";
-import { SymbolType, CodeFileLanguage } from "@prisma/client";
+import { SymbolType, RepositoryFileLanguage } from "@prisma/client";
 import { GithubService } from "../github/github.service";
 import { RepositoriesService } from "../repositories/repositories.service";
 import { OpenAIService } from "../openai/openai.service";
@@ -74,7 +74,7 @@ export class IndexingService {
           this.logger.log(`Processing document: ${logicalPath}`);
 
           // delete existing code file for this document (re-indexing)
-          await this.prisma.codeFile.deleteMany({
+          await this.prisma.repositoryFile.deleteMany({
             where: {
               projectId,
               documentId: doc.documentId,
@@ -85,7 +85,7 @@ export class IndexingService {
           // parse document and extract content
           let parsed: ParsedDocument;
           let rawContent: string;
-          let language: CodeFileLanguage;
+          let language: RepositoryFileLanguage;
 
           if (doc.format === "pdf") {
             const pdfBuffer = readFileSync(doc.path);
@@ -123,7 +123,7 @@ export class IndexingService {
           tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
           tokenAccumulator.fileEmbeddingCallCount += 1;
 
-          const codeFile = await this.prisma.codeFile.create({
+          const repositoryFile = await this.prisma.repositoryFile.create({
             data: {
               projectId,
               documentId: doc.documentId,
@@ -139,11 +139,11 @@ export class IndexingService {
             },
           });
 
-          await this._updateVectorEmbedding(codeFile.id, embedding);
+          await this._updateVectorEmbedding(repositoryFile.id, embedding);
 
           totalFiles++;
 
-          const symbolCount = await this._extractSymbols(projectId, codeFile.id, parsed);
+          const symbolCount = await this._extractSymbols(projectId, repositoryFile.id, parsed);
           totalSymbols += symbolCount;
 
           this.logger.log(`Indexed ${logicalPath}: ${symbolCount} symbols`);
@@ -248,7 +248,7 @@ export class IndexingService {
       const repoName = this.repositoriesService.getRepositoryNameFromUrl(url);
 
       // get existing files for incremental indexing
-      const existingFiles = await this.prisma.codeFile.findMany({
+      const existingFiles = await this.prisma.repositoryFile.findMany({
         where: {
           projectId,
           repositoryId: repository.id,
@@ -295,7 +295,7 @@ export class IndexingService {
           if (isReindex) {
             reindexedCount++;
             // delete old CodeFile
-            await this.prisma.codeFile.deleteMany({
+            await this.prisma.repositoryFile.deleteMany({
               where: {
                 projectId,
                 repositoryId: repository.id,
@@ -335,7 +335,7 @@ export class IndexingService {
           });
 
           // create CodeFile record
-          const codeFile = await this.prisma.codeFile.create({
+          const repositoryFile = await this.prisma.repositoryFile.create({
             data: {
               projectId,
               repositoryId: repository.id,
@@ -353,11 +353,11 @@ export class IndexingService {
             },
           });
 
-          await this._updateVectorEmbedding(codeFile.id, embedding);
+          await this._updateVectorEmbedding(repositoryFile.id, embedding);
 
           totalFiles++;
 
-          const symbolCount = await this._extractSymbols(projectId, codeFile.id, parsed);
+          const symbolCount = await this._extractSymbols(projectId, repositoryFile.id, parsed);
           totalSymbols += symbolCount;
 
           this.logger.log(`Indexed ${file.path}: ${symbolCount} symbols`);
@@ -436,7 +436,7 @@ export class IndexingService {
     return false;
   }
 
-  async _extractSymbols(projectId: string, codeFileId: string, parsed: ParsedDocument): Promise<number> {
+  async _extractSymbols(projectId: string, repositoryFileId: string, parsed: ParsedDocument): Promise<number> {
     let count = 0;
 
     // extract symbols from sections and chunks
@@ -449,10 +449,10 @@ export class IndexingService {
       // epic name (CSV) - domain lookup for user-story projects, distinct from markdown headings
       const epicName = metadata.epicName;
       if (epicName && typeof epicName === "string") {
-        await this.prisma.symbol.create({
+        await this.prisma.repositoryFileSymbol.create({
           data: {
             projectId,
-            codeFileId,
+            repositoryFileId,
             type: "heading",
             name: epicName,
           },
@@ -470,10 +470,10 @@ export class IndexingService {
         // story ID (CSV) - domain lookup for user-story projects
         const storyId = chunkMetadata.storyId;
         if (storyId && typeof storyId === "string") {
-          await this.prisma.symbol.create({
+          await this.prisma.repositoryFileSymbol.create({
             data: {
               projectId,
-              codeFileId,
+              repositoryFileId,
               type: "term",
               name: storyId,
             },
@@ -485,7 +485,7 @@ export class IndexingService {
         const chunkType = chunkMetadata.chunkType;
         const name = chunkMetadata.name;
         if (chunkType && name) {
-          count += await this._extractCodeSymbols(projectId, codeFileId, chunkMetadata);
+          count += await this._extractCodeSymbols(projectId, repositoryFileId, chunkMetadata);
         }
 
         // markdown keyword terms are intentionally NOT emitted - extracted top-5 keywords were stopwords ("for", "see", "github") that polluted symbolSearch results
@@ -495,7 +495,7 @@ export class IndexingService {
     return count;
   }
 
-  async _extractCodeSymbols(projectId: string, codeFileId: string, metadata: Record<string, unknown>): Promise<number> {
+  async _extractCodeSymbols(projectId: string, repositoryFileId: string, metadata: Record<string, unknown>): Promise<number> {
     const chunkType = typeof metadata.chunkType === "string" ? metadata.chunkType : undefined;
     const name = typeof metadata.name === "string" ? metadata.name : undefined;
 
@@ -512,10 +512,10 @@ export class IndexingService {
     const startLine = typeof metadata.startLine === "number" ? metadata.startLine : null;
     const endLine = typeof metadata.endLine === "number" ? metadata.endLine : null;
 
-    await this.prisma.symbol.create({
+    await this.prisma.repositoryFileSymbol.create({
       data: {
         projectId,
-        codeFileId,
+        repositoryFileId,
         type: symbolType,
         name,
         startLine,
@@ -528,7 +528,7 @@ export class IndexingService {
   }
 
   async _deleteOrphanedFiles(projectId: string, repositoryId: string, currentFilePaths: Set<string>): Promise<number> {
-    const existingFiles = await this.prisma.codeFile.findMany({
+    const existingFiles = await this.prisma.repositoryFile.findMany({
       where: {
         projectId,
         repositoryId,
@@ -540,7 +540,7 @@ export class IndexingService {
     for (const file of existingFiles) {
       if (!currentFilePaths.has(file.fullPath)) {
         this.logger.log(`Deleting orphaned file: ${file.fullPath}`);
-        await this.prisma.codeFile.delete({
+        await this.prisma.repositoryFile.delete({
           where: { id: file.id },
         });
         deletedCount++;
@@ -550,11 +550,11 @@ export class IndexingService {
     return deletedCount;
   }
 
-  async _updateVectorEmbedding(codeFileId: string, embedding: number[]): Promise<void> {
+  async _updateVectorEmbedding(repositoryFileId: string, embedding: number[]): Promise<void> {
     await this.prisma.$executeRaw`
-      UPDATE "CodeFile"
+      UPDATE "RepositoryFile"
       SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
-      WHERE id = ${codeFileId}::uuid
+      WHERE id = ${repositoryFileId}::uuid
     `;
   }
 
@@ -576,30 +576,30 @@ export class IndexingService {
       select: { id: true, name: true },
     });
 
-    const codeFiles = await this.prisma.codeFile.findMany({
+    const repositoryFiles = await this.prisma.repositoryFile.findMany({
       where: { projectId },
       select: { id: true, fullPath: true, summary: true },
     });
 
     // nothing to summarize on an empty project - leave Project.summary and Directory rows untouched
-    if (codeFiles.length === 0) {
+    if (repositoryFiles.length === 0) {
       this.logger.log(`Skipping hierarchical summaries for empty project ${projectId}`);
       return;
     }
 
-    this.logger.log(`Generating hierarchical summaries for project ${project.name} (${codeFiles.length} files)`);
+    this.logger.log(`Generating hierarchical summaries for project ${project.name} (${repositoryFiles.length} files)`);
 
-    const treeNodes = buildDirectoryTreeFromCodeFilePaths(codeFiles.map((codeFile) => codeFile.fullPath));
+    const treeNodes = buildDirectoryTreeFromCodeFilePaths(repositoryFiles.map((repositoryFile) => repositoryFile.fullPath));
 
     const fullPathToDirectoryId = await this._directoriesUpsertFromTree(projectId, treeNodes);
 
-    await this._codeFilesLinkToDirectories(codeFiles, fullPathToDirectoryId);
+    await this._codeFilesLinkToDirectories(repositoryFiles, fullPathToDirectoryId);
 
     const directorySummariesByFullPath = await this._directorySummariesGenerateBottomUp({
       projectName: project.name,
       projectId,
       treeNodes,
-      codeFiles,
+      repositoryFiles,
       tokenAccumulator,
     });
 
@@ -627,7 +627,7 @@ export class IndexingService {
       // deeper ones look up their parent's id from the map populated by previous iterations
       const parentId = node.parentFullPath ? (fullPathToDirectoryId.get(node.parentFullPath) ?? null) : null;
 
-      const directory = await this.prisma.directory.upsert({
+      const directory = await this.prisma.repositoryDirectory.upsert({
         where: { projectId_fullPath: { projectId, fullPath: node.fullPath } },
         create: {
           projectId,
@@ -649,11 +649,11 @@ export class IndexingService {
   }
 
   async _codeFilesLinkToDirectories(
-    codeFiles: { id: string; fullPath: string }[],
+    repositoryFiles: { id: string; fullPath: string }[],
     fullPathToDirectoryId: Map<string, string>,
   ): Promise<void> {
-    for (const codeFile of codeFiles) {
-      const containingDirectoryFullPath = findContainingDirectoryFullPath(codeFile.fullPath);
+    for (const repositoryFile of repositoryFiles) {
+      const containingDirectoryFullPath = findContainingDirectoryFullPath(repositoryFile.fullPath);
 
       // file at project root has no containing directory - leave directoryId null
       // otherwise resolve to the upserted Directory row's id
@@ -661,8 +661,8 @@ export class IndexingService {
         ? (fullPathToDirectoryId.get(containingDirectoryFullPath) ?? null)
         : null;
 
-      await this.prisma.codeFile.update({
-        where: { id: codeFile.id },
+      await this.prisma.repositoryFile.update({
+        where: { id: repositoryFile.id },
         data: { directoryId },
       });
     }
@@ -672,13 +672,13 @@ export class IndexingService {
     projectName,
     projectId,
     treeNodes,
-    codeFiles,
+    repositoryFiles,
     tokenAccumulator,
   }: {
     projectName: string;
     projectId: string;
     treeNodes: IndexingDirectoryTreeNode[];
-    codeFiles: { fullPath: string; summary: string | null }[];
+    repositoryFiles: { fullPath: string; summary: string | null }[];
     tokenAccumulator: IndexingTokenAccumulator;
   }): Promise<Map<string, string>> {
     const directorySummariesByFullPath = new Map<string, string>();
@@ -690,12 +690,12 @@ export class IndexingService {
 
       await Promise.all(
         directoriesAtDepth.map(async (directoryNode) => {
-          const fileSummaries: OpenAiFileOrDirectoryPathSummary[] = codeFiles
+          const fileSummaries: OpenAiFileOrDirectoryPathSummary[] = repositoryFiles
             .filter(
-              (codeFile) =>
-                findContainingDirectoryFullPath(codeFile.fullPath) === directoryNode.fullPath && codeFile.summary,
+              (repositoryFile) =>
+                findContainingDirectoryFullPath(repositoryFile.fullPath) === directoryNode.fullPath && repositoryFile.summary,
             )
-            .map((codeFile) => ({ fullPath: codeFile.fullPath, summary: codeFile.summary! }));
+            .map((repositoryFile) => ({ fullPath: repositoryFile.fullPath, summary: repositoryFile.summary! }));
 
           const childDirectorySummaries: OpenAiFileOrDirectoryPathSummary[] = treeNodes
             .filter((node) => node.parentFullPath === directoryNode.fullPath)
@@ -724,7 +724,7 @@ export class IndexingService {
 
             directorySummariesByFullPath.set(directoryNode.fullPath, summary);
 
-            await this.prisma.directory.update({
+            await this.prisma.repositoryDirectory.update({
               where: { projectId_fullPath: { projectId, fullPath: directoryNode.fullPath } },
               data: { summary },
             });

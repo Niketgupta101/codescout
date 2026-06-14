@@ -1,7 +1,7 @@
 import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { AgentToolsService } from "./agent-tools.service";
 import { ConversationsService } from "../conversations/conversations.service";
-import { CodeFileLanguage, SymbolType } from "@prisma/client";
+import { RepositoryFileLanguage, SymbolType } from "@prisma/client";
 import { LLMService } from "../llm/llm.service";
 import { EnvService } from "../env/env.service";
 import { PrismaService } from "../../prisma/prisma.service";
@@ -516,7 +516,7 @@ export class AgentService {
 
     // depth cap is enforced at query time so the formatter doesn't have to filter - keeps the prompt size bounded
     // ordering by depth then path makes the formatted tree natural to read top-down
-    const directories = await this.prisma.directory.findMany({
+    const directories = await this.prisma.repositoryDirectory.findMany({
       where: { projectId, depth: { lte: 3 } },
       orderBy: [{ depth: "asc" }, { fullPath: "asc" }],
       take: 50,
@@ -916,7 +916,7 @@ Answer the question based on these findings:`,
       case "search_code":
         return this.tools.searchCode(projectId, {
           pattern: args.pattern as string,
-          language: args.language as CodeFileLanguage,
+          language: args.language as RepositoryFileLanguage,
           pathPattern: args.pathPattern as string | undefined,
         });
 
