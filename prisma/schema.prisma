@@ -49,37 +49,46 @@ model UserSession {
 }
 
 model Project {
-  id            String         @id @default(uuid()) @db.Uuid
-  name          String         @unique
-  description   String?
-  summary       String?        @db.Text
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
-  repositories          Repository[]
-  repositoryDirectories RepositoryDirectory[]
-  repositoryFiles       RepositoryFile[]
-  repositoryFileSymbols RepositoryFileSymbol[]
-  projectDocuments      ProjectDocument[]
-  conversations         Conversation[]
+  id                         String                      @id @default(uuid()) @db.Uuid
+  name                       String                      @unique
+  description                String?
+  summary                    String?                     @db.Text
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  repositories               Repository[]
+  repositoryDirectories      RepositoryDirectory[]
+  repositoryFiles            RepositoryFile[]
+  repositoryFileSymbols      RepositoryFileSymbol[]
+  projectDocuments           ProjectDocument[]
+  conversations              Conversation[]
+  projectFolders             ProjectFolder[]
+  projectTopics              ProjectTopic[]
+  projectDocumentTopics      ProjectDocumentTopic[]
+  projectDocumentStatements  ProjectDocumentStatement[]
+  projectDocumentActionItems ProjectDocumentActionItem[]
+  projectDocumentReferences  ProjectDocumentReference[]
+  decisionRecords            DecisionRecord[]
 }
 
 model RepositoryDirectory {
-  id              String                @id @default(uuid()) @db.Uuid
-  projectId       String                @db.Uuid
-  project         Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id        String  @id @default(uuid()) @db.Uuid
+  projectId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  parentId        String?               @db.Uuid
-  parent          RepositoryDirectory?  @relation("RepositoryDirectoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
-  children        RepositoryDirectory[] @relation("RepositoryDirectoryHierarchy")
+  parentId String?               @db.Uuid
+  parent   RepositoryDirectory?  @relation("RepositoryDirectoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children RepositoryDirectory[] @relation("RepositoryDirectoryHierarchy")
 
   repositoryFiles RepositoryFile[]
 
-  fullPath        String
-  depth           Int
-  summary         String?               @db.Text
+  relatedProjectTopics ProjectTopic[] @relation("ProjectTopicRelatedDirectories")
 
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
+  fullPath String
+  depth    Int
+  summary  String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([projectId, fullPath])
   @@index([projectId, parentId])
@@ -102,10 +111,8 @@ model RepositoryFile {
   id               String                        @id @default(uuid()) @db.Uuid
   projectId        String                        @db.Uuid
   project          Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  repositoryId     String?                       @db.Uuid
-  repository       Repository?                   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  documentId       String?                       @db.Uuid
-  document         ProjectDocument?              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  repositoryId     String                        @db.Uuid
+  repository       Repository                    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   directoryId      String?                       @db.Uuid
   directory        RepositoryDirectory?          @relation(fields: [directoryId], references: [id], onDelete: SetNull)
   fullPath         String
@@ -122,7 +129,6 @@ model RepositoryFile {
   @@unique([projectId, fullPath])
   @@index([projectId, language])
   @@index([repositoryId])
-  @@index([documentId])
   @@index([directoryId])
   @@index([checksum])
 }
@@ -175,32 +181,19 @@ enum RepositoryStatus {
 }
 
 model Repository {
-  id             String           @id @default(uuid()) @db.Uuid
-  projectId      String           @db.Uuid
-  project        Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name           String
-  url            String
-  branch         String           @default("main")
-  lastCommitHash String?
-  status         RepositoryStatus @default(pending)
-  type           RepositoryType   @default(custom)
-  error          String?          @db.Text
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  id              String           @id @default(uuid()) @db.Uuid
+  projectId       String           @db.Uuid
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name            String
+  url             String
+  branch          String           @default("main")
+  lastCommitHash  String?
+  status          RepositoryStatus @default(pending)
+  type            RepositoryType   @default(custom)
+  error           String?          @db.Text
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   repositoryFiles RepositoryFile[]
-}
-
-enum DocumentFormat {
-  csv
-  markdown
-  pdf
-}
-
-enum DocumentType {
-  technicalSpecification
-  userStories
-  meetingNotes
-  custom
 }
 
 enum DocumentStatus {
@@ -210,19 +203,75 @@ enum DocumentStatus {
   failed
 }
 
+enum ProjectDocumentProvider {
+  googleDrive
+  chat
+  manual
+}
+
+enum ProjectDocumentType {
+  conceptPaper
+  scopeDocument
+  transcript
+  userStory
+  implementationPlan
+  feedback
+  changeRequest
+  chat
+  architectureDecisionRecord
+  knowledgeDoc
+  other
+}
+
 model ProjectDocument {
-  id              String           @id @default(uuid()) @db.Uuid
-  projectId       String           @db.Uuid
-  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  filename        String
-  format          DocumentFormat
-  status          DocumentStatus   @default(pending)
-  documentType    DocumentType     @default(custom)
-  metadata        Json?
-  error           String?          @db.Text
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  repositoryFiles RepositoryFile[]
+  id              String         @id @default(uuid()) @db.Uuid
+  projectId       String         @db.Uuid
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectFolderId String?        @db.Uuid
+  projectFolder   ProjectFolder? @relation(fields: [projectFolderId], references: [id], onDelete: SetNull)
+
+  name                       String
+  provider                   ProjectDocumentProvider
+  providerExternalId         String?
+  providerExternalModifiedAt DateTime?
+  // inferred genre; other = generic-lens catch-all so a novel genre routes instead of mis-filing
+  type                       ProjectDocumentType           @default(other)
+  // raw classifier output (type rationale, confidence, maturity cues); audit/correction only, not queried
+  aiClassificationOutput     String?                       @db.Text
+  artifactKey                String?
+  versionLabel               String?
+  path                       String
+  // original format provenance (docx/pdf/xlsx/...); open-ended since markitdown normalizes to markdown upstream
+  contentType                String
+  contentRaw                 String                        @db.Text
+  status                     DocumentStatus                @default(pending)
+  error                      String?                       @db.Text
+  summary                    String?                       @db.Text
+  summaryEmbedding           Unsupported("halfvec(3072)")?
+  checksum                   String?
+  // event time (meeting/doc date), parsed from filename or body - distinct from createdAt (ingest time)
+  occurredAt                 DateTime
+  createdAt                  DateTime                      @default(now())
+  updatedAt                  DateTime                      @updatedAt
+
+  supersedesDocumentId  String?           @db.Uuid
+  supersedesDocument    ProjectDocument?  @relation("ProjectDocumentVersionLineage", fields: [supersedesDocumentId], references: [id], onDelete: SetNull)
+  supersededByDocuments ProjectDocument[] @relation("ProjectDocumentVersionLineage")
+
+  topics               ProjectDocumentTopic[]
+  statements           ProjectDocumentStatement[]
+  actionItems          ProjectDocumentActionItem[] @relation("ActionItemDocument")
+  resolvedActionItems  ProjectDocumentActionItem[] @relation("ActionItemResolvedBy")
+  referencesFrom       ProjectDocumentReference[]  @relation("ReferenceFromDocument")
+  referencesResolvedTo ProjectDocumentReference[]  @relation("ReferenceResolvedToDocument")
+  relatedProjectTopics ProjectTopic[]              @relation("ProjectTopicRelatedDocuments")
+
+  @@index([projectId, type])
+  @@index([projectId, occurredAt])
+  @@index([projectFolderId])
+  @@index([providerExternalId])
+  @@index([artifactKey])
+  @@index([checksum])
 }
 
 model Conversation {
@@ -240,14 +289,278 @@ model Conversation {
 }
 
 model Message {
-  id               String                       @id @default(uuid()) @db.Uuid
-  conversationId   String                       @db.Uuid
-  conversation     Conversation                 @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  assitant         Boolean                      @default(false)
-  content          String                       @db.Text
+  id               String                        @id @default(uuid()) @db.Uuid
+  conversationId   String                        @db.Uuid
+  conversation     Conversation                  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  assitant         Boolean                       @default(false)
+  content          String                        @db.Text
   contentEmbedding Unsupported("halfvec(3072)")?
   toolCalls        Json?
   metadata         Json?
-  createdAt        DateTime                     @default(now())
-  updatedAt        DateTime                     @updatedAt
+  createdAt        DateTime                      @default(now())
+  updatedAt        DateTime                      @updatedAt
+}
+
+enum ProjectFolderProvider {
+  googleDrive
+}
+
+// an external folder linked to a project for auto-indexing; auth is a global Google service account in env
+// (share the folder with the service-account email, paste the link) - no per-row credentials
+model ProjectFolder {
+  id           String                @id @default(uuid()) @db.Uuid
+  projectId    String                @db.Uuid
+  project      Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name         String
+  provider     ProjectFolderProvider @default(googleDrive)
+  providerId   String
+  lastSyncedAt DateTime?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  documents    ProjectDocument[]
+
+  @@unique([projectId, provider, providerId])
+}
+
+enum ProjectTopicType {
+  feature
+  component
+  system
+  decision
+}
+
+// canonical cross-document topic; per-document occurrences canonicalize into this
+model ProjectTopic {
+  id               String                        @id @default(uuid()) @db.Uuid
+  projectId        String                        @db.Uuid
+  project          Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name             String
+  nameAliases      String[]
+  type             ProjectTopicType?
+  summary          String?                       @db.Text
+  summaryEmbedding Unsupported("halfvec(3072)")?
+  createdAt        DateTime                      @default(now())
+  updatedAt        DateTime                      @updatedAt
+
+  documentTopics               ProjectDocumentTopic[]
+  relatedRepositoryDirectories RepositoryDirectory[]  @relation("ProjectTopicRelatedDirectories")
+  relatedDocuments             ProjectDocument[]      @relation("ProjectTopicRelatedDocuments")
+
+  @@index([projectId])
+}
+
+// per-document occurrence of a topic; canonical link is optional (set by the reconciler)
+model ProjectDocumentTopic {
+  id                String          @id @default(uuid()) @db.Uuid
+  projectId         String          @db.Uuid
+  project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectDocumentId String          @db.Uuid
+  projectDocument   ProjectDocument @relation(fields: [projectDocumentId], references: [id], onDelete: Cascade)
+  projectTopicId    String?         @db.Uuid
+  projectTopic      ProjectTopic?   @relation(fields: [projectTopicId], references: [id], onDelete: SetNull)
+  name              String
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  statements       ProjectDocumentStatement[]  @relation("StatementTopic")
+  optionStatements ProjectDocumentStatement[]  @relation("StatementOptionTopic")
+  actionItems      ProjectDocumentActionItem[]
+  references       ProjectDocumentReference[]
+
+  @@index([projectDocumentId])
+  @@index([projectTopicId])
+}
+
+enum ProjectDocumentStatementType {
+  fact
+  proposal
+  decision
+  question
+}
+
+enum ProjectDocumentDecisionStatus {
+  open
+  accepted
+  rejected
+  deferred
+  superseded
+}
+
+enum ProjectDocumentImplementationStatus {
+  notStarted
+  inProgress
+  blocked
+  done
+  reverted
+}
+
+// a thing stated in one document; first-class so it can be vector-searched and filtered by the axes/validity
+model ProjectDocumentStatement {
+  id                     String               @id @default(uuid()) @db.Uuid
+  projectId              String               @db.Uuid
+  project                Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectDocumentId      String               @db.Uuid
+  projectDocument        ProjectDocument      @relation(fields: [projectDocumentId], references: [id], onDelete: Cascade)
+  projectDocumentTopicId String               @db.Uuid
+  projectDocumentTopic   ProjectDocumentTopic @relation("StatementTopic", fields: [projectDocumentTopicId], references: [id], onDelete: Cascade)
+
+  // verbatim span from the document (evidence)
+  textRaw              String                        @db.Text
+  // normalized self-contained claim (what gets embedded / searched / threaded)
+  textDerived          String                        @db.Text
+  textDerivedEmbedding Unsupported("halfvec(3072)")?
+
+  // orthogonal axes (replace a single growing kind enum)
+  type                 ProjectDocumentStatementType
+  // superseded is RELATIONAL (reconciler-only)
+  decisionStatus       ProjectDocumentDecisionStatus?
+  // reverted is RELATIONAL (reconciler-only)
+  implementationStatus ProjectDocumentImplementationStatus?
+
+  // the specific option this statement concerns (e.g. "Redis token bucket"); null if about the topic itself
+  optionTopicId String?               @db.Uuid
+  optionTopic   ProjectDocumentTopic? @relation("StatementOptionTopic", fields: [optionTopicId], references: [id], onDelete: SetNull)
+  // why tied to decisionStatus (rejected/deferred/blocked); null when the source states no reason
+  reason        String?               @db.Text
+
+  // LOCAL text hint of the prior decision this changes; the reconciler resolves it to an id
+  replacesPriorStatementText String?                    @db.Text
+  replacesPriorStatementId   String?                    @db.Uuid
+  replacesPriorStatement     ProjectDocumentStatement?  @relation("StatementSupersedes", fields: [replacesPriorStatementId], references: [id], onDelete: SetNull)
+  supersedingStatements      ProjectDocumentStatement[] @relation("StatementSupersedes")
+  replacedByStatementId      String?                    @db.Uuid
+  replacedByStatement        ProjectDocumentStatement?  @relation("StatementReplacedBy", fields: [replacedByStatementId], references: [id], onDelete: SetNull)
+  replacesStatements         ProjectDocumentStatement[] @relation("StatementReplacedBy")
+
+  actor            String?
+  // raw model output for this statement; debugging only, not queried
+  aiAnalysisOutput String? @db.Text
+
+  // event time, from the document
+  occurredAt DateTime
+  // RELATIONAL bi-temporal validity (reconciler-set); null validUntil = currently valid
+  validFrom  DateTime?
+  validUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  resolvedReferences ProjectDocumentReference[] @relation("ReferenceResolvedToStatement")
+
+  @@index([projectDocumentId])
+  @@index([projectDocumentTopicId])
+  @@index([projectId, type])
+  @@index([projectId, decisionStatus])
+  @@index([validUntil])
+}
+
+enum ProjectDocumentActionItemStatus {
+  open
+  inProgress
+  blocked
+  done
+  lapsed
+}
+
+// who owes what by when; status=lapsed is RELATIONAL (silence != lapsed)
+model ProjectDocumentActionItem {
+  id                     String                @id @default(uuid()) @db.Uuid
+  projectId              String                @db.Uuid
+  project                Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectDocumentId      String                @db.Uuid
+  projectDocument        ProjectDocument       @relation("ActionItemDocument", fields: [projectDocumentId], references: [id], onDelete: Cascade)
+  projectDocumentTopicId String?               @db.Uuid
+  projectDocumentTopic   ProjectDocumentTopic? @relation(fields: [projectDocumentTopicId], references: [id], onDelete: SetNull)
+
+  owner                String
+  description          String                          @db.Text
+  // "next meeting" / "before launch" / a date - free text
+  expectedBy           String?
+  status               ProjectDocumentActionItemStatus @default(open)
+  // what the item is waiting on, when status=blocked
+  blockedOn            String?                         @db.Text
+  reason               String?                         @db.Text
+  // RELATIONAL: document carrying the decisive done/lapsed signal
+  resolvedByDocumentId String?                         @db.Uuid
+  resolvedByDocument   ProjectDocument?                @relation("ActionItemResolvedBy", fields: [resolvedByDocumentId], references: [id], onDelete: SetNull)
+  // verbatim span from the document (evidence)
+  textRaw              String                          @db.Text
+  // raw model output for this action item; debugging only, not queried
+  aiAnalysisOutput     String?                         @db.Text
+  createdAt            DateTime                        @default(now())
+  updatedAt            DateTime                        @updatedAt
+
+  @@index([projectDocumentId])
+  @@index([projectId, status])
+}
+
+enum ProjectDocumentReferenceResolution {
+  notFound
+  linked
+  contradicted
+}
+
+// something a document points to that we try to resolve; resolution is RELATIONAL
+model ProjectDocumentReference {
+  id                     String                @id @default(uuid()) @db.Uuid
+  projectId              String                @db.Uuid
+  project                Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fromProjectDocumentId  String                @db.Uuid
+  fromProjectDocument    ProjectDocument       @relation("ReferenceFromDocument", fields: [fromProjectDocumentId], references: [id], onDelete: Cascade)
+  projectDocumentTopicId String?               @db.Uuid
+  projectDocumentTopic   ProjectDocumentTopic? @relation(fields: [projectDocumentTopicId], references: [id], onDelete: SetNull)
+
+  // e.g. "Q1 security review", "Phase 2 plan v1"
+  referentText          String                             @db.Text
+  // what the doc assumes is true about the referent
+  expectation           String                             @db.Text
+  // notFound (default) = context gap, linked, contradicted
+  resolution            ProjectDocumentReferenceResolution @default(notFound)
+  resolvedToDocumentId  String?                            @db.Uuid
+  resolvedToDocument    ProjectDocument?                   @relation("ReferenceResolvedToDocument", fields: [resolvedToDocumentId], references: [id], onDelete: SetNull)
+  resolvedToStatementId String?                            @db.Uuid
+  resolvedToStatement   ProjectDocumentStatement?          @relation("ReferenceResolvedToStatement", fields: [resolvedToStatementId], references: [id], onDelete: SetNull)
+  // verbatim span from the document (evidence)
+  textRaw               String                             @db.Text
+  createdAt             DateTime                           @default(now())
+  updatedAt             DateTime                           @updatedAt
+
+  @@index([fromProjectDocumentId])
+  @@index([projectId, resolution])
+}
+
+enum DecisionRecordType {
+  architecture
+}
+
+enum DecisionRecordStatus {
+  proposed
+  accepted
+  deprecated
+  superseded
+}
+
+// curated cross-project decision log (operator-promoted, ADR-style); not auto-extracted
+model DecisionRecord {
+  id                  String               @id @default(uuid()) @db.Uuid
+  // null = org-wide architectural decision spanning projects
+  projectId           String?              @db.Uuid
+  project             Project?             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type                DecisionRecordType   @default(architecture)
+  title               String
+  description         String               @db.Text
+  reason              String?              @db.Text
+  status              DecisionRecordStatus @default(proposed)
+  decidedAt           DateTime?
+  // underlying statement ids this record promotes/aggregates (provenance back to documents)
+  sourceStatementIds  String[]             @db.Uuid
+  supersedesRecordId  String?              @db.Uuid
+  supersedesRecord    DecisionRecord?      @relation("DecisionRecordLineage", fields: [supersedesRecordId], references: [id], onDelete: SetNull)
+  supersededByRecords DecisionRecord[]     @relation("DecisionRecordLineage")
+  // operator who promoted it (curation is a deliberate act)
+  createdBy           String
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@index([projectId, status])
 }
