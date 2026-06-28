@@ -36,40 +36,40 @@ void (async () => {
     logger.log(`Backfilling ${projects.length} project(s)`);
 
     for (const project of projects) {
-      const codeFiles = await prisma.codeFile.findMany({
+      const repositoryFiles = await prisma.repositoryFile.findMany({
         where: { projectId: project.id },
         select: { id: true, fullPath: true, rawContent: true, language: true },
       });
 
-      logger.log(`[${project.name}] ${codeFiles.length} files`);
+      logger.log(`[${project.name}] ${repositoryFiles.length} files`);
 
       let reprocessedFiles = 0;
       let skippedFiles = 0;
       let symbolsBefore = 0;
       let symbolsAfter = 0;
 
-      for (const codeFile of codeFiles) {
-        if (!codeFile.rawContent) {
+      for (const repositoryFile of repositoryFiles) {
+        if (!repositoryFile.rawContent) {
           skippedFiles++;
           continue;
         }
 
-        const existingCount = await prisma.symbol.count({ where: { codeFileId: codeFile.id } });
+        const existingCount = await prisma.repositoryFileSymbol.count({ where: { repositoryFileId: repositoryFile.id } });
         symbolsBefore += existingCount;
 
         let parsed;
         try {
-          parsed = await parsersService.parseDocument(codeFile.fullPath, codeFile.language ?? undefined, codeFile.rawContent);
+          parsed = await parsersService.parseDocument(repositoryFile.fullPath, repositoryFile.language ?? undefined, repositoryFile.rawContent);
         } catch (error) {
           // parsers throw for unsupported formats and malformed content; leaving existing symbols intact is safer than wiping them with no replacement
-          logger.warn(`[${project.name}] ${codeFile.fullPath}: parse failed (${error instanceof Error ? error.message : String(error)}); leaving existing symbols intact`);
+          logger.warn(`[${project.name}] ${repositoryFile.fullPath}: parse failed (${error instanceof Error ? error.message : String(error)}); leaving existing symbols intact`);
           skippedFiles++;
           continue;
         }
 
-        await prisma.symbol.deleteMany({ where: { codeFileId: codeFile.id } });
+        await prisma.repositoryFileSymbol.deleteMany({ where: { repositoryFileId: repositoryFile.id } });
 
-        const inserted = await indexingService._extractSymbols(project.id, codeFile.id, parsed);
+        const inserted = await indexingService._extractSymbols(project.id, repositoryFile.id, parsed);
         symbolsAfter += inserted;
         reprocessedFiles++;
       }

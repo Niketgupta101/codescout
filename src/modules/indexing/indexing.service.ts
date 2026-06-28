@@ -1,14 +1,12 @@
 import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
-import { readFileSync } from "fs";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ParsersService } from "../parsers/parsers.service";
 import { calculateChecksum } from "./utils/checksum.util";
-import { SymbolType, RepositoryFileLanguage } from "@prisma/client";
+import { SymbolType } from "@prisma/client";
 import { GithubService } from "../github/github.service";
 import { RepositoriesService } from "../repositories/repositories.service";
 import { OpenAIService } from "../openai/openai.service";
 import type { ParsedDocument } from "../parsers/types/parsed-document.type";
-import { DocumentIndexingOptions } from "./types/document-indexing-options.type";
 import { IndexingResult } from "./types/indexing-result.type";
 import { RepositoryIndexingOptions } from "./types/repository-indexing-options.type";
 import { IndexingDirectoryTreeNode } from "./types/indexing-directory-tree-node.type";
@@ -49,135 +47,43 @@ export class IndexingService {
     readonly openaiService: OpenAIService,
   ) {}
 
-  async indexDocuments(projectId: string, documents: DocumentIndexingOptions[]): Promise<IndexingResult> {
-    const startTime = Date.now();
-    this.logger.log(`Starting document indexing for project ${projectId}`);
+  async projectDocumentIndex(projectDocumentId: string): Promise<void> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
 
-    const errors: string[] = [];
-    const tokenAccumulator = buildEmptyIndexingTokenAccumulator();
-    let totalFiles = 0;
-    let totalSymbols = 0;
-
-    // verify project exists
-    const project = await this.prisma.project.findUnique({
-      where: { id: projectId },
+    await this.prisma.projectDocument.update({
+      where: { id: projectDocument.id },
+      data: { status: "indexing", error: null },
     });
 
-    if (!project) {
-      throw new Error(`Project ${projectId} not found`);
-    }
-
     try {
-      for (const doc of documents) {
-        try {
-          const logicalPath = doc.originalName ?? doc.path;
-          this.logger.log(`Processing document: ${logicalPath}`);
-
-          // delete existing code file for this document (re-indexing)
-          await this.prisma.repositoryFile.deleteMany({
-            where: {
-              projectId,
-              documentId: doc.documentId,
-              fullPath: logicalPath,
-            },
-          });
-
-          // parse document and extract content
-          let parsed: ParsedDocument;
-          let rawContent: string;
-          let language: RepositoryFileLanguage;
-
-          if (doc.format === "pdf") {
-            const pdfBuffer = readFileSync(doc.path);
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format, pdfBuffer);
-            rawContent = parsed.rawContent ?? "";
-            language = "pdf";
-          } else if (doc.format === "csv") {
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format);
-            rawContent = parsed.rawContent ?? readFileSync(doc.path, "utf-8");
-            language = "csv";
-          } else if (doc.format === "markdown") {
-            rawContent = readFileSync(doc.path, "utf-8");
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format);
-            language = "markdown";
-          } else {
-            throw new Error(`Unsupported document format ${doc.format as string}`);
-          }
-
-          const checksum = calculateChecksum(rawContent);
-
-          this.logger.log(`Generating summary for ${logicalPath}...`);
-          const { summary, usage: summaryUsage } = await this.openaiService.generateFileSummary({
-            content: rawContent,
-            language,
-            filePath: logicalPath,
-          });
-
-          tokenAccumulator.fileSummaryInputTokens += summaryUsage.inputTokens;
-          tokenAccumulator.fileSummaryOutputTokens += summaryUsage.outputTokens;
-          tokenAccumulator.fileSummaryCallCount += 1;
-
-          this.logger.log(`Generating embedding for ${logicalPath}...`);
-          const { embedding, usage: embeddingUsage } = await this.openaiService.generateEmbedding({ input: summary });
-
-          tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
-          tokenAccumulator.fileEmbeddingCallCount += 1;
-
-          const repositoryFile = await this.prisma.repositoryFile.create({
-            data: {
-              projectId,
-              documentId: doc.documentId,
-              fullPath: logicalPath,
-              language,
-              rawContent,
-              summary,
-              checksum,
-              metadata: {
-                format: doc.format,
-                originalPath: doc.path,
-              },
-            },
-          });
-
-          await this._updateVectorEmbedding(repositoryFile.id, embedding);
-
-          totalFiles++;
-
-          const symbolCount = await this._extractSymbols(projectId, repositoryFile.id, parsed);
-          totalSymbols += symbolCount;
-
-          this.logger.log(`Indexed ${logicalPath}: ${symbolCount} symbols`);
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          const errorMsg = `Failed to index ${doc.path}: ${errorMessage}`;
-          this.logger.error(errorMsg);
-          errors.push(errorMsg);
-        }
-      }
-
-      // generate hierarchical summaries before reporting "complete" so callers can rely on Project.summary being populated when indexing returns
-      await this._hierarchicalSummariesGenerate(projectId, tokenAccumulator);
-
-      const duration = this._formatDuration(Date.now() - startTime);
-
-      this.logger.log(`Document indexing complete: ${totalFiles} files, ${totalSymbols} symbols (${duration})`);
-
-      logIndexingCostBreakdown({
-        logger: this.logger,
-        context: `documents in project ${projectId}`,
-        accumulator: tokenAccumulator,
+      // markitdown normalizes every source to markdown upstream
+      const { summary } = await this.openaiService.generateFileSummary({
+        content: projectDocument.contentRaw,
+        language: "markdown",
+        filePath: projectDocument.path,
       });
 
-      return {
-        projectId,
-        totalFiles,
-        totalSymbols,
-        duration,
-        errors,
-      };
+      const { embedding } = await this.openaiService.generateEmbedding({ input: summary });
+
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: { summary, status: "completed" },
+      });
+
+      // summary embedding is an unsupported halfvec column so it is written via raw sql
+      await this.prisma.$executeRaw`
+        UPDATE "ProjectDocument"
+        SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
+        WHERE id = ${projectDocument.id}::uuid
+      `;
     } catch (error) {
-      this.logger.error("Document indexing failed", error);
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to index document ${projectDocument.path}`, error);
+
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: { status: "failed", error: message },
+      });
     }
   }
 
@@ -495,7 +401,11 @@ export class IndexingService {
     return count;
   }
 
-  async _extractCodeSymbols(projectId: string, repositoryFileId: string, metadata: Record<string, unknown>): Promise<number> {
+  async _extractCodeSymbols(
+    projectId: string,
+    repositoryFileId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<number> {
     const chunkType = typeof metadata.chunkType === "string" ? metadata.chunkType : undefined;
     const name = typeof metadata.name === "string" ? metadata.name : undefined;
 
@@ -589,7 +499,9 @@ export class IndexingService {
 
     this.logger.log(`Generating hierarchical summaries for project ${project.name} (${repositoryFiles.length} files)`);
 
-    const treeNodes = buildDirectoryTreeFromCodeFilePaths(repositoryFiles.map((repositoryFile) => repositoryFile.fullPath));
+    const treeNodes = buildDirectoryTreeFromCodeFilePaths(
+      repositoryFiles.map((repositoryFile) => repositoryFile.fullPath),
+    );
 
     const fullPathToDirectoryId = await this._directoriesUpsertFromTree(projectId, treeNodes);
 
@@ -693,7 +605,8 @@ export class IndexingService {
           const fileSummaries: OpenAiFileOrDirectoryPathSummary[] = repositoryFiles
             .filter(
               (repositoryFile) =>
-                findContainingDirectoryFullPath(repositoryFile.fullPath) === directoryNode.fullPath && repositoryFile.summary,
+                findContainingDirectoryFullPath(repositoryFile.fullPath) === directoryNode.fullPath &&
+                repositoryFile.summary,
             )
             .map((repositoryFile) => ({ fullPath: repositoryFile.fullPath, summary: repositoryFile.summary! }));
 

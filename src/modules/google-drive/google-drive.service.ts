@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { google, drive_v3 } from "googleapis";
 import { EnvService } from "../env/env.service";
 import type { GoogleDriveFile } from "./types/google-drive-file.type";
+import type { GoogleServiceAccountCredentials } from "./types/google-service-account-credentials.type";
 
 const DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
@@ -41,6 +42,34 @@ export class GoogleDriveService {
     return Buffer.from(response.data as ArrayBuffer);
   }
 
+  /**
+   * Fetches a single file's metadata by id.
+   * @param getFileInput - the file id to look up
+   * @returns The file metadata; path falls back to the name since a single lookup has no crawl-relative path.
+   */
+  async getFile(getFileInput: { fileId: string }): Promise<GoogleDriveFile> {
+    this._assertValidDriveId(getFileInput.fileId);
+    const drive = this._getDriveClient();
+    const { data }: { data: drive_v3.Schema$File } = await drive.files.get({
+      fileId: getFileInput.fileId,
+      fields: "id, name, mimeType, modifiedTime, size, parents",
+    });
+
+    if (!data.id || !data.name) {
+      throw new Error(`google drive file not found or malformed: ${getFileInput.fileId}`);
+    }
+
+    return {
+      id: data.id,
+      name: data.name,
+      mimeType: data.mimeType ?? "",
+      path: data.name,
+      parentId: data.parents?.[0] ?? "",
+      modifiedAt: data.modifiedTime ? new Date(data.modifiedTime) : null,
+      sizeBytes: data.size ? Number(data.size) : null,
+    };
+  }
+
   // rejects ids that aren't url-safe so they can't break out of the drive search query
   _assertValidDriveId(id: string): void {
     if (!DRIVE_ID_PATTERN.test(id)) {
@@ -56,7 +85,7 @@ export class GoogleDriveService {
       throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY is not configured");
     }
 
-    const credentials = JSON.parse(serviceAccountKey);
+    const credentials = JSON.parse(serviceAccountKey) as GoogleServiceAccountCredentials;
     const auth = new google.auth.JWT({
       email: credentials.client_email,
       key: credentials.private_key,

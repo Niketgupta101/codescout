@@ -6,7 +6,6 @@ import { PrismaModule } from "../../prisma/prisma.module";
 import { ParsersModule } from "../parsers/parsers.module";
 import { GithubModule } from "../github/github.module";
 import { RepositoriesModule } from "../repositories/repositories.module";
-import { DocumentsModule } from "../documents/documents.module";
 import { OpenAIModule } from "../openai/openai.module";
 
 @Module({
@@ -16,7 +15,6 @@ import { OpenAIModule } from "../openai/openai.module";
     ParsersModule,
     GithubModule,
     forwardRef(() => RepositoriesModule),
-    forwardRef(() => DocumentsModule),
     OpenAIModule,
   ],
   providers: [IndexingService, IndexingCostService],
