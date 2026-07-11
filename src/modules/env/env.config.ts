@@ -63,10 +63,10 @@ export class EnvConfig {
   @IsString()
   ANTHROPIC_API_KEY: string;
 
-  // service account json (stringified) for read-only google drive folder indexing
+  // base64-encoded service account json for read-only google drive folder indexing
   @IsOptional()
   @IsString()
-  GOOGLE_SERVICE_ACCOUNT_KEY?: string;
+  GOOGLE_SERVICE_ACCOUNT_KEY_BASE64?: string;
 
   @IsOptional()
   @IsNumber()

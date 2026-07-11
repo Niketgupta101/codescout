@@ -2,12 +2,13 @@ import { Controller, Get, Post, Delete, Param, Body, Query } from "@nestjs/commo
 import { ProjectFolderService } from "./project-folders.service";
 import { CreateProjectFolderDto } from "./dtos/create-project-folder.dto";
 import { FindAllProjectFoldersDto } from "./dtos/find-all-project-folders.dto";
+import { ImportProjectFolderDto } from "./dtos/import-project-folder.dto";
 import { Entity } from "src/decorators/entity.decorator";
 import { ProjectFolderEntity } from "./entities/project-folder.entity";
 import { ProjectFolderPageEntity } from "./entities/project-folder-page.entity";
 import { ProjectFolderImportResultEntity } from "./entities/project-folder-import-result.entity";
 
-@Controller("project/:projectId/project-folder")
+@Controller("project/:projectId/project-folders")
 @Entity({ type: ProjectFolderEntity })
 export class ProjectFoldersController {
   constructor(readonly projectFolderService: ProjectFolderService) {}
@@ -30,7 +31,10 @@ export class ProjectFoldersController {
 
   @Post(":projectFolderId/import")
   @Entity({ type: ProjectFolderImportResultEntity })
-  async import(@Param("projectFolderId") projectFolderId: string) {
-    return this.projectFolderService.importProjectFolder(projectFolderId);
+  async import(
+    @Param("projectFolderId") projectFolderId: string,
+    @Query() importProjectFolderDto: ImportProjectFolderDto,
+  ) {
+    return this.projectFolderService.importProjectFolder(projectFolderId, importProjectFolderDto.force ?? false);
   }
 }

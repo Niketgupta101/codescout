@@ -6,7 +6,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { GoogleDriveService } from "../google-drive/google-drive.service";
 import { MarkitdownService } from "../markitdown/markitdown.service";
 import { IndexingService } from "../indexing/indexing.service";
-import { projectDocumentParseOccurredAt } from "./utils/parse-occurred-at.util";
+import { stripNullBytes } from "../openai/utils/strip-null-bytes.util";
 import type { CreateProjectDocumentDto } from "./dtos/create-project-document.dto";
 
 @Injectable()
@@ -29,13 +29,13 @@ export class ProjectDocumentService {
 
       const file = await this.googleDriveService.getFile({ fileId: providerExternalId });
       const buffer = await this.googleDriveService.downloadFile({ fileId: providerExternalId });
-      const { title, markdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      const { markdown: rawMarkdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      // strip null bytes at the ingestion boundary so postgres text columns accept the content
+      const markdown = stripNullBytes(rawMarkdown);
 
       const checksum = createHash("sha256").update(markdown).digest("hex");
-      const occurredAt = projectDocumentParseOccurredAt({
-        text: `${title ?? ""} ${file.name}`,
-        fallback: file.modifiedAt ?? new Date(),
-      });
+      // provisional; classify infers the real event date from the content
+      const occurredAt = file.modifiedAt ?? new Date();
       const contentType = path.extname(file.name).replace(/^\./, "").toLowerCase();
 
       const projectDocument = await this.prisma.projectDocument.create({
@@ -55,6 +55,8 @@ export class ProjectDocumentService {
       });
 
       await this.indexingService.projectDocumentIndex(projectDocument.id);
+      await this.indexingService.projectDocumentClassify(projectDocument.id);
+      await this.indexingService.projectDocumentExtract(projectDocument.id);
 
       return projectDocument;
     } else {
@@ -82,13 +84,13 @@ export class ProjectDocumentService {
     try {
       const file = await this.googleDriveService.getFile({ fileId: projectDocument.providerExternalId });
       const buffer = await this.googleDriveService.downloadFile({ fileId: projectDocument.providerExternalId });
-      const { title, markdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      const { markdown: rawMarkdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      // strip null bytes at the ingestion boundary so postgres text columns accept the content
+      const markdown = stripNullBytes(rawMarkdown);
 
       const checksum = createHash("sha256").update(markdown).digest("hex");
-      const occurredAt = projectDocumentParseOccurredAt({
-        text: `${title ?? ""} ${file.name}`,
-        fallback: file.modifiedAt ?? new Date(),
-      });
+      // provisional; classify infers the real event date from the content
+      const occurredAt = file.modifiedAt ?? new Date();
       const contentType = path.extname(file.name).replace(/^\./, "").toLowerCase();
 
       updated = await this.prisma.projectDocument.update({
@@ -115,6 +117,8 @@ export class ProjectDocumentService {
     }
 
     await this.indexingService.projectDocumentIndex(updated.id);
+    await this.indexingService.projectDocumentClassify(updated.id);
+    await this.indexingService.projectDocumentExtract(updated.id);
 
     return updated;
   }

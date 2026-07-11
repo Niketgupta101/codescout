@@ -2,7 +2,15 @@ import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ParsersService } from "../parsers/parsers.service";
 import { calculateChecksum } from "./utils/checksum.util";
-import { SymbolType } from "@prisma/client";
+import {
+  SymbolType,
+  ProjectDocumentType,
+  ProjectDocumentStatementType,
+  ProjectDocumentDecisionStatus,
+  ProjectDocumentImplementationStatus,
+  ProjectDocumentActionItemStatus,
+  ProjectTopicType,
+} from "@prisma/client";
 import { GithubService } from "../github/github.service";
 import { RepositoriesService } from "../repositories/repositories.service";
 import { OpenAIService } from "../openai/openai.service";
@@ -50,6 +58,8 @@ export class IndexingService {
   async projectDocumentIndex(projectDocumentId: string): Promise<void> {
     const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
 
+    this.logger.log(`Indexing document ${projectDocument.path}`);
+
     await this.prisma.projectDocument.update({
       where: { id: projectDocument.id },
       data: { status: "indexing", error: null },
@@ -85,6 +95,315 @@ export class IndexingService {
         data: { status: "failed", error: message },
       });
     }
+  }
+
+  /**
+   * Infers a document's genre (ProjectDocumentType) and event date from its content, recording the classifier output.
+   * Non-critical: on failure the type/date are left at their provisional values so a bad classification never fails the import.
+   * @param projectDocumentId - the document to classify
+   */
+  async projectDocumentClassify(projectDocumentId: string): Promise<void> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
+
+    this.logger.log(`Classifying document ${projectDocument.path}`);
+
+    try {
+      const classification = await this.openaiService.generateDocumentClassification({
+        content: projectDocument.contentRaw,
+        name: projectDocument.name,
+        types: Object.values(ProjectDocumentType),
+      });
+
+      // the model is constrained to the enum, but fall back to other if it ever drifts
+      const type = (Object.values(ProjectDocumentType) as string[]).includes(classification.type)
+        ? (classification.type as ProjectDocumentType)
+        : ProjectDocumentType.other;
+
+      // refine the provisional occurredAt with the inferred event date when it parses
+      const inferredOccurredAt = classification.occurredAt ? new Date(classification.occurredAt) : null;
+      const occurredAt =
+        inferredOccurredAt && !Number.isNaN(inferredOccurredAt.getTime()) ? inferredOccurredAt : undefined;
+
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: {
+          type,
+          ...(occurredAt && { occurredAt }),
+          aiClassificationOutput: JSON.stringify({
+            type: classification.type,
+            rationale: classification.rationale,
+            confidence: classification.confidence,
+            occurredAt: classification.occurredAt,
+          }),
+        },
+      });
+    } catch (error) {
+      // classification is non-critical: leave type/date at their provisional values and log
+      this.logger.error(`Failed to classify document ${projectDocument.path}`, error);
+    }
+  }
+
+  /**
+   * Extracts the local knowledge graph (topics, statements, action items, references) from a document.
+   * Only LOCAL fields are written here; threading and bi-temporal validity are left to the reconciler.
+   * Non-critical: on failure the document stays indexed without statements rather than failing.
+   * @param projectDocumentId - the document to extract from
+   */
+  async projectDocumentExtract(projectDocumentId: string): Promise<void> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
+
+    this.logger.log(`Extracting document ${projectDocument.path}`);
+
+    // reconciler-only enum values are excluded so extraction can only set locally-observable states
+    const decisionStatuses: ProjectDocumentDecisionStatus[] = Object.values(ProjectDocumentDecisionStatus).filter(
+      (status) => status !== ProjectDocumentDecisionStatus.superseded,
+    );
+    const implementationStatuses: ProjectDocumentImplementationStatus[] = Object.values(
+      ProjectDocumentImplementationStatus,
+    ).filter((status) => status !== ProjectDocumentImplementationStatus.reverted);
+    const actionItemStatuses: ProjectDocumentActionItemStatus[] = Object.values(ProjectDocumentActionItemStatus).filter(
+      (status) => status !== ProjectDocumentActionItemStatus.lapsed,
+    );
+
+    try {
+      // extraction produces statements liberally; its own topic enumeration is discarded in favor of grouping below
+      const { extraction } = await this.openaiService.generateDocumentExtraction({
+        content: projectDocument.contentRaw,
+        name: projectDocument.name,
+        documentType: projectDocument.type,
+        enums: {
+          statementType: Object.values(ProjectDocumentStatementType),
+          decisionStatus: decisionStatuses,
+          implementationStatus: implementationStatuses,
+          actionItemStatus: actionItemStatuses,
+        },
+      });
+
+      // filter statements and action items down to substantive, non-redundant knowledge (drops ephemeral/rubbish)
+      const keptStatements = await this._filterByValue({
+        items: extraction.statements,
+        toText: (statement) => statement.textDerived,
+        name: projectDocument.name,
+        documentType: projectDocument.type,
+      });
+      const keptActionItems = await this._filterByValue({
+        items: extraction.actionItems,
+        toText: (actionItem) => actionItem.description,
+        name: projectDocument.name,
+        documentType: projectDocument.type,
+      });
+
+      // group statements, action items, and references together into shared doc-topics, so actions and references
+      // route to the grouped topics instead of the raw extraction's per-item names
+      const groupingTexts = [
+        ...keptStatements.map((statement) => statement.textDerived),
+        ...keptActionItems.map((actionItem) => actionItem.description),
+        ...extraction.references.map((reference) => reference.referentText),
+      ];
+
+      const topicNameByGroupingIndex: (string | undefined)[] = groupingTexts.map(() => undefined);
+
+      if (groupingTexts.length > 0) {
+        const { groups } = await this.openaiService.generateStatementGrouping({
+          statements: groupingTexts,
+          types: Object.values(ProjectTopicType),
+        });
+
+        for (const group of groups) {
+          for (const memberIndex of group.memberIndices) {
+            if (memberIndex >= 0 && memberIndex < groupingTexts.length && !topicNameByGroupingIndex[memberIndex]) {
+              topicNameByGroupingIndex[memberIndex] = group.name;
+            }
+          }
+        }
+      }
+
+      // split the shared topic assignments back to statements / action items / references by their offset in the list
+      const actionOffset = keptStatements.length;
+      const referenceOffset = actionOffset + keptActionItems.length;
+      const statementTopicName = topicNameByGroupingIndex.slice(0, actionOffset);
+      const actionTopicName = topicNameByGroupingIndex.slice(actionOffset, referenceOffset);
+      const referenceTopicName = topicNameByGroupingIndex.slice(referenceOffset);
+
+      // resolve each kept statement's status/date and embed it BEFORE the transaction - embeddings are slow openai
+      // calls that must not run inside a db transaction, and statements with no topic group are dropped here
+      const statementRows: {
+        statement: (typeof keptStatements)[number];
+        topicName: string;
+        embedding: number[];
+        occurredAt: Date;
+        decisionStatus: ProjectDocumentDecisionStatus | null;
+        implementationStatus: ProjectDocumentImplementationStatus | null;
+      }[] = [];
+
+      for (let index = 0; index < keptStatements.length; index++) {
+        const statement = keptStatements[index];
+        const topicName = statementTopicName[index];
+
+        if (!topicName) {
+          this.logger.warn(`Skipping statement with no topic group in ${projectDocument.path}`);
+          continue;
+        }
+
+        const decisionStatus =
+          statement.decisionStatus && decisionStatuses.includes(statement.decisionStatus as ProjectDocumentDecisionStatus)
+            ? (statement.decisionStatus as ProjectDocumentDecisionStatus)
+            : null;
+        const implementationStatus =
+          statement.implementationStatus &&
+          implementationStatuses.includes(statement.implementationStatus as ProjectDocumentImplementationStatus)
+            ? (statement.implementationStatus as ProjectDocumentImplementationStatus)
+            : null;
+
+        // use the statement's own inferred date, falling back to the document's date
+        const inferredOccurredAt = statement.occurredAt ? new Date(statement.occurredAt) : null;
+        const occurredAt =
+          inferredOccurredAt && !Number.isNaN(inferredOccurredAt.getTime())
+            ? inferredOccurredAt
+            : projectDocument.occurredAt;
+
+        const { embedding } = await this.openaiService.generateEmbedding({ input: statement.textDerived });
+
+        statementRows.push({ statement, topicName, embedding, occurredAt, decisionStatus, implementationStatus });
+      }
+
+      // doc-topics come from the shared grouping, plus any option-topic names referenced by statements
+      const referencedTopicNames = [
+        ...topicNameByGroupingIndex.filter((name): name is string => !!name),
+        ...keptStatements.map((statement) => statement.optionTopicName ?? ""),
+      ].filter((name) => name.trim().length > 0);
+
+      const topicNameToId = new Map<string, string>();
+
+      // apply atomically: wipe the prior extraction and recreate it in one transaction, so a mid-write failure never
+      // leaves the document with its old extraction deleted and the new one only partially written
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.projectDocumentStatement.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+          await tx.projectDocumentActionItem.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+          await tx.projectDocumentReference.deleteMany({ where: { fromProjectDocumentId: projectDocument.id } });
+          await tx.projectDocumentTopic.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+
+          for (const name of new Set(referencedTopicNames)) {
+            const topic = await tx.projectDocumentTopic.create({
+              data: { projectId: projectDocument.projectId, projectDocumentId: projectDocument.id, name },
+            });
+            topicNameToId.set(name, topic.id);
+          }
+
+          for (const row of statementRows) {
+            const projectDocumentTopicId = topicNameToId.get(row.topicName);
+
+            if (!projectDocumentTopicId) {
+              continue;
+            }
+
+            const created = await tx.projectDocumentStatement.create({
+              data: {
+                projectId: projectDocument.projectId,
+                projectDocumentId: projectDocument.id,
+                projectDocumentTopicId,
+                textRaw: row.statement.textRaw,
+                textDerived: row.statement.textDerived,
+                type: row.statement.type as ProjectDocumentStatementType,
+                decisionStatus: row.decisionStatus,
+                implementationStatus: row.implementationStatus,
+                optionTopicId: row.statement.optionTopicName
+                  ? (topicNameToId.get(row.statement.optionTopicName) ?? null)
+                  : null,
+                reason: row.statement.reason,
+                replacesPriorStatementText: row.statement.replacesPriorStatementText,
+                actor: row.statement.actor,
+                occurredAt: row.occurredAt,
+                aiAnalysisOutput: JSON.stringify(row.statement),
+              },
+            });
+
+            // textDerivedEmbedding is an unsupported halfvec column so it is written via raw sql
+            await tx.$executeRaw`
+              UPDATE "ProjectDocumentStatement"
+              SET "textDerivedEmbedding" = ${`[${row.embedding.join(",")}]`}::halfvec
+              WHERE id = ${created.id}::uuid
+            `;
+          }
+
+          for (let index = 0; index < keptActionItems.length; index++) {
+            const actionItem = keptActionItems[index];
+            const topicName = actionTopicName[index];
+            const status = actionItemStatuses.includes(actionItem.status as ProjectDocumentActionItemStatus)
+              ? (actionItem.status as ProjectDocumentActionItemStatus)
+              : ProjectDocumentActionItemStatus.open;
+
+            await tx.projectDocumentActionItem.create({
+              data: {
+                projectId: projectDocument.projectId,
+                projectDocumentId: projectDocument.id,
+                projectDocumentTopicId: topicName ? (topicNameToId.get(topicName) ?? null) : null,
+                owner: actionItem.owner,
+                description: actionItem.description,
+                expectedBy: actionItem.expectedBy,
+                status,
+                blockedOn: actionItem.blockedOn,
+                reason: actionItem.reason,
+                textRaw: actionItem.textRaw,
+                aiAnalysisOutput: JSON.stringify(actionItem),
+              },
+            });
+          }
+
+          for (let index = 0; index < extraction.references.length; index++) {
+            const reference = extraction.references[index];
+            const topicName = referenceTopicName[index];
+
+            await tx.projectDocumentReference.create({
+              data: {
+                projectId: projectDocument.projectId,
+                fromProjectDocumentId: projectDocument.id,
+                projectDocumentTopicId: topicName ? (topicNameToId.get(topicName) ?? null) : null,
+                referentText: reference.referentText,
+                expectation: reference.expectation,
+                textRaw: reference.textRaw,
+              },
+            });
+          }
+        },
+        { timeout: 30000 },
+      );
+
+      this.logger.log(
+        `Extracted ${projectDocument.path}: kept ${statementRows.length}/${extraction.statements.length} statements, ${topicNameToId.size} topics, ${keptActionItems.length}/${extraction.actionItems.length} action items`,
+      );
+    } catch (error) {
+      // extraction is enrichment: log and leave the document indexed without statements rather than failing it
+      this.logger.error(`Failed to extract document ${projectDocument.path}`, error);
+    }
+  }
+
+  // filters a list of extracted items down to the substantive ones via the value filter, preserving order
+  async _filterByValue<T>({
+    items,
+    toText,
+    name,
+    documentType,
+  }: {
+    items: T[];
+    toText: (item: T) => string;
+    name: string;
+    documentType: string;
+  }): Promise<T[]> {
+    if (items.length === 0) {
+      return [];
+    }
+
+    const { decisions } = await this.openaiService.generateStatementFilter({
+      statements: items.map(toText),
+      name,
+      documentType,
+    });
+
+    const keepIndices = new Set(decisions.filter((decision) => decision.keep).map((decision) => decision.index));
+
+    return items.filter((_, index) => keepIndices.has(index));
   }
 
   async indexRepository(
