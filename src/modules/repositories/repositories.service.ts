@@ -94,14 +94,14 @@ export class RepositoriesService {
     await this.findOne(repositoryId); // ensure resource exists
 
     const [, , repository] = await this.prisma.$transaction([
-      this.prisma.symbol.deleteMany({
+      this.prisma.repositoryFileSymbol.deleteMany({
         where: {
-          codeFile: {
+          repositoryFile: {
             repositoryId,
           },
         },
       }),
-      this.prisma.codeFile.deleteMany({
+      this.prisma.repositoryFile.deleteMany({
         where: {
           repositoryId,
         },

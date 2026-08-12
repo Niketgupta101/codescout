@@ -48,7 +48,7 @@ export class AgentToolsService {
       // case-insensitive substring match on fullPath; `*` is stripped so callers passing glob-like patterns still work
       const substring = pathPattern?.replace(/\*/g, "").trim();
 
-      const files = await this.prisma.codeFile.findMany({
+      const files = await this.prisma.repositoryFile.findMany({
         where: {
           projectId,
           ...(substring
@@ -89,7 +89,7 @@ export class AgentToolsService {
     try {
       this.logger.debug(`readFile(path=${filePath})`);
 
-      const file = await this.prisma.codeFile.findFirst({
+      const file = await this.prisma.repositoryFile.findFirst({
         where: {
           projectId,
           fullPath: filePath,
@@ -148,7 +148,7 @@ export class AgentToolsService {
         };
       }
 
-      const file = await this.prisma.codeFile.findFirst({
+      const file = await this.prisma.repositoryFile.findFirst({
         where: {
           projectId,
           fullPath: filePath,
@@ -217,7 +217,7 @@ export class AgentToolsService {
       // strip glob-style wildcards from the path filter - fullPath uses a substring match, so wildcards aren't meaningful
       const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
-      const symbols = await this.prisma.symbol.findMany({
+      const symbols = await this.prisma.repositoryFileSymbol.findMany({
         where: {
           projectId,
           name: {
@@ -227,7 +227,7 @@ export class AgentToolsService {
           ...(type ? { type: type } : {}),
           ...(pathSubstring
             ? {
-                codeFile: {
+                repositoryFile: {
                   fullPath: {
                     contains: pathSubstring,
                     mode: "insensitive",
@@ -237,7 +237,7 @@ export class AgentToolsService {
             : {}),
         },
         include: {
-          codeFile: {
+          repositoryFile: {
             select: {
               fullPath: true,
               directory: { select: { summary: true } },
@@ -257,10 +257,10 @@ export class AgentToolsService {
       const symbolInfos: SymbolInfo[] = symbols.map((symbol) => ({
         projectId: symbol.project.id,
         projectName: symbol.project.name,
-        directorySummary: symbol.codeFile.directory?.summary ?? undefined,
+        directorySummary: symbol.repositoryFile.directory?.summary ?? undefined,
         name: symbol.name,
         type: symbol.type,
-        filePath: symbol.codeFile.fullPath,
+        filePath: symbol.repositoryFile.fullPath,
         startLine: symbol.startLine ?? undefined,
         endLine: symbol.endLine ?? undefined,
       }));
@@ -288,7 +288,7 @@ export class AgentToolsService {
       // strip glob-style wildcards from the path filter - fullPath uses a substring match, so wildcards aren't meaningful
       const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
-      const files = await this.prisma.codeFile.findMany({
+      const files = await this.prisma.repositoryFile.findMany({
         where: {
           projectId,
           language,
@@ -346,7 +346,7 @@ export class AgentToolsService {
     try {
       this.logger.debug(`getFileTree()`);
 
-      const files = await this.prisma.codeFile.findMany({
+      const files = await this.prisma.repositoryFile.findMany({
         where: { projectId },
         select: {
           fullPath: true,
@@ -415,20 +415,20 @@ export class AgentToolsService {
 
       // fetch the directory itself + its immediate children in one query each
       // child directories whose parentId points at this row are the navigational next-level entries
-      const directoryRow = await this.prisma.directory.findUnique({
+      const directoryRow = await this.prisma.repositoryDirectory.findUnique({
         where: { projectId_fullPath: { projectId, fullPath: directoryLookupPath } },
         select: { id: true, summary: true },
       });
 
       const childDirectories = directoryRow
-        ? await this.prisma.directory.findMany({
+        ? await this.prisma.repositoryDirectory.findMany({
             where: { projectId, parentId: directoryRow.id },
             select: { fullPath: true, summary: true },
             orderBy: { fullPath: "asc" },
           })
         : [];
 
-      const files = await this.prisma.codeFile.findMany({
+      const files = await this.prisma.repositoryFile.findMany({
         where: {
           projectId,
           fullPath: { startsWith: normalizedPathWithSlash },
@@ -517,10 +517,10 @@ export class AgentToolsService {
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
-        FROM "CodeFile" cf
+        FROM "RepositoryFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
-        LEFT JOIN "Directory" dir ON cf."directoryId" = dir.id
-        LEFT JOIN "Document" d ON cf."documentId" = d.id
+        LEFT JOIN "RepositoryDirectory" dir ON cf."directoryId" = dir.id
+        LEFT JOIN "ProjectDocument" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = '${projectId}'
           AND cf."summaryEmbedding" IS NOT NULL
@@ -617,10 +617,10 @@ export class AgentToolsService {
           COALESCE(d."documentType"::text, r."type"::text) as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
-        FROM "CodeFile" cf
+        FROM "RepositoryFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
-        LEFT JOIN "Directory" dir ON cf."directoryId" = dir.id
-        LEFT JOIN "Document" d ON cf."documentId" = d.id
+        LEFT JOIN "RepositoryDirectory" dir ON cf."directoryId" = dir.id
+        LEFT JOIN "ProjectDocument" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = ANY($3::uuid[])
           AND cf."summaryEmbedding" IS NOT NULL
@@ -671,7 +671,7 @@ export class AgentToolsService {
 
       const pathSubstring = pathPattern?.replace(/\*/g, "").trim();
 
-      const symbols = await this.prisma.symbol.findMany({
+      const symbols = await this.prisma.repositoryFileSymbol.findMany({
         where: {
           project: actor.accessContext.getWhereInputFor("read", "Project"),
           name: {
@@ -681,7 +681,7 @@ export class AgentToolsService {
           ...(type ? { type: type } : {}),
           ...(pathSubstring
             ? {
-                codeFile: {
+                repositoryFile: {
                   fullPath: {
                     contains: pathSubstring,
                     mode: "insensitive",
@@ -691,7 +691,7 @@ export class AgentToolsService {
             : {}),
         },
         include: {
-          codeFile: {
+          repositoryFile: {
             select: {
               fullPath: true,
               directory: { select: { summary: true } },
@@ -713,10 +713,10 @@ export class AgentToolsService {
         projectId: symbol.project.id,
         projectName: symbol.project.name,
         projectSummary: truncateProjectSummary(symbol.project.summary),
-        directorySummary: symbol.codeFile.directory?.summary ?? undefined,
+        directorySummary: symbol.repositoryFile.directory?.summary ?? undefined,
         name: symbol.name,
         type: symbol.type,
-        filePath: symbol.codeFile.fullPath,
+        filePath: symbol.repositoryFile.fullPath,
         startLine: symbol.startLine ?? undefined,
         endLine: symbol.endLine ?? undefined,
       }));

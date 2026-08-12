@@ -53,40 +53,40 @@ model Project {
   name          String         @unique
   description   String?
   summary       String?        @db.Text
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  codeFiles     CodeFile[]
-  symbols       Symbol[]
-  repositories  Repository[]
-  documents     Document[]
-  conversations Conversation[]
-  directories   Directory[]
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  repositories          Repository[]
+  repositoryDirectories RepositoryDirectory[]
+  repositoryFiles       RepositoryFile[]
+  repositoryFileSymbols RepositoryFileSymbol[]
+  projectDocuments      ProjectDocument[]
+  conversations         Conversation[]
 }
 
-model Directory {
-  id        String      @id @default(uuid()) @db.Uuid
-  projectId String      @db.Uuid
-  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+model RepositoryDirectory {
+  id              String                @id @default(uuid()) @db.Uuid
+  projectId       String                @db.Uuid
+  project         Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  parentId  String?     @db.Uuid
-  parent    Directory?  @relation("DirectoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
-  children  Directory[] @relation("DirectoryHierarchy")
+  parentId        String?               @db.Uuid
+  parent          RepositoryDirectory?  @relation("RepositoryDirectoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children        RepositoryDirectory[] @relation("RepositoryDirectoryHierarchy")
 
-  codeFiles CodeFile[]
+  repositoryFiles RepositoryFile[]
 
-  fullPath  String
-  depth     Int
-  summary   String?     @db.Text
+  fullPath        String
+  depth           Int
+  summary         String?               @db.Text
 
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
 
   @@unique([projectId, fullPath])
   @@index([projectId, parentId])
   @@index([projectId, depth])
 }
 
-enum CodeFileLanguage {
+enum RepositoryFileLanguage {
   typescript
   javascript
   csv
@@ -98,26 +98,26 @@ enum CodeFileLanguage {
   prisma
 }
 
-model CodeFile {
-  id               String                       @id @default(uuid()) @db.Uuid
-  projectId        String                       @db.Uuid
-  project          Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  repositoryId     String?                      @db.Uuid
-  repository       Repository?                  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  documentId       String?                      @db.Uuid
-  document         Document?                    @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  directoryId      String?                      @db.Uuid
-  directory        Directory?                   @relation(fields: [directoryId], references: [id], onDelete: SetNull)
+model RepositoryFile {
+  id               String                        @id @default(uuid()) @db.Uuid
+  projectId        String                        @db.Uuid
+  project          Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  repositoryId     String?                       @db.Uuid
+  repository       Repository?                   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  documentId       String?                       @db.Uuid
+  document         ProjectDocument?              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  directoryId      String?                       @db.Uuid
+  directory        RepositoryDirectory?          @relation(fields: [directoryId], references: [id], onDelete: SetNull)
   fullPath         String
-  language         CodeFileLanguage
-  rawContent       String                       @db.Text
-  summary          String?                      @db.Text
+  language         RepositoryFileLanguage
+  rawContent       String                        @db.Text
+  summary          String?                       @db.Text
   summaryEmbedding Unsupported("halfvec(3072)")?
   metadata         Json?
   checksum         String?
-  createdAt        DateTime                     @default(now())
-  updatedAt        DateTime                     @updatedAt
-  symbols          Symbol[]
+  createdAt        DateTime                      @default(now())
+  updatedAt        DateTime                      @updatedAt
+  symbols          RepositoryFileSymbol[]
 
   @@unique([projectId, fullPath])
   @@index([projectId, language])
@@ -139,24 +139,24 @@ enum SymbolType {
   module
 }
 
-model Symbol {
-  id         String     @id @default(uuid()) @db.Uuid
-  projectId  String     @db.Uuid
-  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  codeFileId String     @db.Uuid
-  codeFile   CodeFile   @relation(fields: [codeFileId], references: [id], onDelete: Cascade)
-  name       String
-  type       SymbolType
-  // 1-indexed inclusive line range of the symbol within the source file; null for non-code symbol kinds (e.g. CSV epic/storyId rows)
-  startLine  Int?
-  endLine    Int?
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+model RepositoryFileSymbol {
+  id               String         @id @default(uuid()) @db.Uuid
+  projectId        String         @db.Uuid
+  project          Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  repositoryFileId String         @db.Uuid
+  repositoryFile   RepositoryFile @relation(fields: [repositoryFileId], references: [id], onDelete: Cascade)
+  name             String
+  type             SymbolType
+  // 1-indexed inclusive line range of the symbol within the source file
+  startLine        Int?
+  endLine          Int?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   @@index([projectId, type])
   @@index([projectId, name])
   @@index([name])
-  @@index([codeFileId])
+  @@index([repositoryFileId])
 }
 
 enum RepositoryType {
@@ -187,7 +187,7 @@ model Repository {
   error          String?          @db.Text
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
-  codeFiles      CodeFile[]
+  repositoryFiles RepositoryFile[]
 }
 
 enum DocumentFormat {
@@ -210,19 +210,19 @@ enum DocumentStatus {
   failed
 }
 
-model Document {
-  id           String         @id @default(uuid()) @db.Uuid
-  projectId    String         @db.Uuid
-  project      Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  filename     String
-  format       DocumentFormat
-  status       DocumentStatus @default(pending)
-  documentType DocumentType   @default(custom)
-  metadata     Json?
-  error        String?        @db.Text
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-  codeFiles    CodeFile[]
+model ProjectDocument {
+  id              String           @id @default(uuid()) @db.Uuid
+  projectId       String           @db.Uuid
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  filename        String
+  format          DocumentFormat
+  status          DocumentStatus   @default(pending)
+  documentType    DocumentType     @default(custom)
+  metadata        Json?
+  error           String?          @db.Text
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  repositoryFiles RepositoryFile[]
 }
 
 model Conversation {
