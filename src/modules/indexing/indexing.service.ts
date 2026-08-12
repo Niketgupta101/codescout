@@ -1,14 +1,21 @@
 import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
-import { readFileSync } from "fs";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ParsersService } from "../parsers/parsers.service";
 import { calculateChecksum } from "./utils/checksum.util";
-import { SymbolType, RepositoryFileLanguage } from "@prisma/client";
+import {
+  SymbolType,
+  ProjectDocumentType,
+  ProjectDocumentStatementType,
+  ProjectDocumentDecisionStatus,
+  ProjectDocumentImplementationStatus,
+  ProjectDocumentActionItemStatus,
+  ProjectTopicType,
+  ProjectDataOrigin,
+} from "@prisma/client";
 import { GithubService } from "../github/github.service";
 import { RepositoriesService } from "../repositories/repositories.service";
 import { OpenAIService } from "../openai/openai.service";
 import type { ParsedDocument } from "../parsers/types/parsed-document.type";
-import { DocumentIndexingOptions } from "./types/document-indexing-options.type";
 import { IndexingResult } from "./types/indexing-result.type";
 import { RepositoryIndexingOptions } from "./types/repository-indexing-options.type";
 import { IndexingDirectoryTreeNode } from "./types/indexing-directory-tree-node.type";
@@ -21,6 +28,12 @@ import { buildEmptyIndexingTokenAccumulator, logIndexingCostBreakdown } from "./
 import { buildRepositoryIndexFileFilter } from "./utils/repository-file-filter.util";
 import { detectNextJsFileMetadata } from "./utils/detect-nextjs-file-metadata.util";
 import { OpenAiFileOrDirectoryPathSummary } from "../openai/types/openai-file-or-directory-path-summary.type";
+import {
+  filterRetrievalReadyActionItems,
+  filterRetrievalReadyStatements,
+  filterStatementsDuplicatedByActions,
+} from "./utils/extraction-quality.util";
+import { selectDocumentExtractionContents } from "./utils/document-extraction-content.util";
 
 const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   function: SymbolType.function,
@@ -49,135 +62,379 @@ export class IndexingService {
     readonly openaiService: OpenAIService,
   ) {}
 
-  async indexDocuments(projectId: string, documents: DocumentIndexingOptions[]): Promise<IndexingResult> {
-    const startTime = Date.now();
-    this.logger.log(`Starting document indexing for project ${projectId}`);
+  async projectDocumentIndex(projectDocumentId: string): Promise<void> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
 
-    const errors: string[] = [];
-    const tokenAccumulator = buildEmptyIndexingTokenAccumulator();
-    let totalFiles = 0;
-    let totalSymbols = 0;
+    this.logger.log(`Indexing document ${projectDocument.path}`);
 
-    // verify project exists
-    const project = await this.prisma.project.findUnique({
-      where: { id: projectId },
+    await this.prisma.projectDocument.update({
+      where: { id: projectDocument.id },
+      data: { status: "indexing", error: null },
     });
 
-    if (!project) {
-      throw new Error(`Project ${projectId} not found`);
+    try {
+      // markitdown normalizes every source to markdown upstream
+      const { summary } = await this.openaiService.generateFileSummary({
+        content: projectDocument.contentRaw,
+        language: "markdown",
+        filePath: projectDocument.path,
+      });
+
+      const { embedding } = await this.openaiService.generateEmbedding({ input: summary });
+
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: { summary, status: "completed" },
+      });
+
+      // summary embedding is an unsupported halfvec column so it is written via raw sql
+      await this.prisma.$executeRaw`
+        UPDATE "ProjectDocument"
+        SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
+        WHERE id = ${projectDocument.id}::uuid
+      `;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to index document ${projectDocument.path}`, error);
+
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: { status: "failed", error: message },
+      });
     }
+  }
+
+  /**
+   * Infers a document's genre (ProjectDocumentType) and event date from its content, recording the classifier output.
+   * Non-critical: on failure the type/date are left at their provisional values so a bad classification never fails the import.
+   * @param projectDocumentId - the document to classify
+   */
+  async projectDocumentClassify(projectDocumentId: string): Promise<void> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
+
+    this.logger.log(`Classifying document ${projectDocument.path}`);
 
     try {
-      for (const doc of documents) {
-        try {
-          const logicalPath = doc.originalName ?? doc.path;
-          this.logger.log(`Processing document: ${logicalPath}`);
+      const classification = await this.openaiService.generateDocumentClassification({
+        content: projectDocument.contentRaw,
+        name: projectDocument.name,
+        types: Object.values(ProjectDocumentType),
+      });
 
-          // delete existing code file for this document (re-indexing)
-          await this.prisma.repositoryFile.deleteMany({
-            where: {
-              projectId,
-              documentId: doc.documentId,
-              fullPath: logicalPath,
-            },
-          });
+      // the model is constrained to the enum, but fall back to other if it ever drifts
+      const type = (Object.values(ProjectDocumentType) as string[]).includes(classification.type)
+        ? (classification.type as ProjectDocumentType)
+        : ProjectDocumentType.other;
 
-          // parse document and extract content
-          let parsed: ParsedDocument;
-          let rawContent: string;
-          let language: RepositoryFileLanguage;
+      // refine the provisional occurredAt with the inferred event date when it parses
+      const inferredOccurredAt = classification.occurredAt ? new Date(classification.occurredAt) : null;
+      const occurredAt =
+        inferredOccurredAt && !Number.isNaN(inferredOccurredAt.getTime()) ? inferredOccurredAt : undefined;
 
-          if (doc.format === "pdf") {
-            const pdfBuffer = readFileSync(doc.path);
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format, pdfBuffer);
-            rawContent = parsed.rawContent ?? "";
-            language = "pdf";
-          } else if (doc.format === "csv") {
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format);
-            rawContent = parsed.rawContent ?? readFileSync(doc.path, "utf-8");
-            language = "csv";
-          } else if (doc.format === "markdown") {
-            rawContent = readFileSync(doc.path, "utf-8");
-            parsed = await this.parsersService.parseDocument(doc.path, doc.format);
-            language = "markdown";
-          } else {
-            throw new Error(`Unsupported document format ${doc.format as string}`);
+      await this.prisma.projectDocument.update({
+        where: { id: projectDocument.id },
+        data: {
+          type,
+          ...(occurredAt && { occurredAt }),
+          aiClassificationOutput: JSON.stringify({
+            type: classification.type,
+            rationale: classification.rationale,
+            confidence: classification.confidence,
+            occurredAt: classification.occurredAt,
+          }),
+        },
+      });
+    } catch (error) {
+      // classification is non-critical: leave type/date at their provisional values and log
+      this.logger.error(`Failed to classify document ${projectDocument.path}`, error);
+    }
+  }
+
+  /**
+   * Extracts the local knowledge graph (topics, statements, action items, references) from a document.
+   * Only LOCAL fields are written here; threading and bi-temporal validity are left to the reconciler.
+   * Non-critical: on failure the document stays indexed without statements rather than failing.
+   * @param projectDocumentId - the document to extract from
+   */
+  async projectDocumentExtract(projectDocumentId: string): Promise<boolean> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({
+      where: { id: projectDocumentId },
+      include: {
+        project: {
+          select: {
+            name: true,
+            description: true,
+          },
+        },
+      },
+    });
+
+    this.logger.log(`Extracting document ${projectDocument.path}`);
+
+    // reconciler-only enum values are excluded so extraction can only set locally-observable states
+    const decisionStatuses: ProjectDocumentDecisionStatus[] = Object.values(ProjectDocumentDecisionStatus).filter(
+      (status) => status !== ProjectDocumentDecisionStatus.superseded,
+    );
+    const implementationStatuses: ProjectDocumentImplementationStatus[] = Object.values(
+      ProjectDocumentImplementationStatus,
+    ).filter((status) => status !== ProjectDocumentImplementationStatus.reverted);
+    const actionItemStatuses: ProjectDocumentActionItemStatus[] = Object.values(ProjectDocumentActionItemStatus).filter(
+      (status) => status !== ProjectDocumentActionItemStatus.lapsed,
+    );
+
+    try {
+      const projectContext = [
+        `Project name: ${projectDocument.project.name}`,
+        projectDocument.project.description ? `Description: ${projectDocument.project.description}` : null,
+      ]
+        .filter((line): line is string => !!line)
+        .join("\n")
+        .slice(0, 8000);
+      const extractionContents = selectDocumentExtractionContents(projectDocument.contentRaw);
+      if (extractionContents.usedCuratedSections) {
+        this.logger.log(
+          `Using structured meeting sections for ${projectDocument.path}: ${extractionContents.statementContent.length} statement characters, ${extractionContents.actionContent.length} action characters, ${projectDocument.contentRaw.length} raw characters`,
+        );
+      }
+
+      // extraction produces statements liberally; its own topic enumeration is discarded in favor of grouping below
+      const { extraction } = await this.openaiService.generateDocumentExtraction({
+        content: extractionContents.statementContent,
+        actionContent: extractionContents.actionContent,
+        name: projectDocument.name,
+        projectContext,
+        documentType: projectDocument.type,
+        enums: {
+          statementType: Object.values(ProjectDocumentStatementType),
+          decisionStatus: decisionStatuses,
+          implementationStatus: implementationStatuses,
+          actionItemStatus: actionItemStatuses,
+        },
+      });
+
+      // Statements and actions have different quality contracts. Curate them independently so fragments can be merged,
+      // vague text can be rewritten from its source, and requirements do not leak into the action-item list.
+      const curateStatements = () =>
+        this.openaiService.generateStatementCuration({
+          statements: extraction.statements,
+          name: projectDocument.name,
+          projectContext,
+          documentType: projectDocument.type,
+          enums: {
+            statementType: Object.values(ProjectDocumentStatementType),
+            decisionStatus: decisionStatuses,
+            implementationStatus: implementationStatuses,
+          },
+        });
+      const curateActionItems = () =>
+        this.openaiService.generateActionItemCuration({
+          actionItems: extraction.actionItems,
+          name: projectDocument.name,
+          projectContext,
+          documentType: projectDocument.type,
+          enums: { actionItemStatus: actionItemStatuses },
+        });
+      const [statementCuration, actionItemCuration] =
+        this.openaiService.inferenceConcurrency === 1
+          ? [await curateStatements(), await curateActionItems()]
+          : await Promise.all([curateStatements(), curateActionItems()]);
+      const keptActionItems = filterRetrievalReadyActionItems(actionItemCuration.actionItems);
+      const keptStatements = filterStatementsDuplicatedByActions(
+        filterRetrievalReadyStatements(statementCuration.statements),
+        keptActionItems,
+      );
+
+      // group statements, action items, and references together into shared doc-topics, so actions and references
+      // route to the grouped topics instead of the raw extraction's per-item names
+      const groupingTexts = [
+        ...keptStatements.map((statement) => statement.textDerived),
+        ...keptActionItems.map((actionItem) => actionItem.description),
+        ...extraction.references.map((reference) => reference.referentText),
+      ];
+
+      const topicNameByGroupingIndex: (string | undefined)[] = groupingTexts.map(() => undefined);
+
+      if (groupingTexts.length > 0) {
+        const { groups } = await this.openaiService.generateStatementGrouping({
+          statements: groupingTexts,
+          types: Object.values(ProjectTopicType),
+        });
+
+        for (const group of groups) {
+          for (const memberIndex of group.memberIndices) {
+            if (memberIndex >= 0 && memberIndex < groupingTexts.length && !topicNameByGroupingIndex[memberIndex]) {
+              topicNameByGroupingIndex[memberIndex] = group.name;
+            }
           }
-
-          const checksum = calculateChecksum(rawContent);
-
-          this.logger.log(`Generating summary for ${logicalPath}...`);
-          const { summary, usage: summaryUsage } = await this.openaiService.generateFileSummary({
-            content: rawContent,
-            language,
-            filePath: logicalPath,
-          });
-
-          tokenAccumulator.fileSummaryInputTokens += summaryUsage.inputTokens;
-          tokenAccumulator.fileSummaryOutputTokens += summaryUsage.outputTokens;
-          tokenAccumulator.fileSummaryCallCount += 1;
-
-          this.logger.log(`Generating embedding for ${logicalPath}...`);
-          const { embedding, usage: embeddingUsage } = await this.openaiService.generateEmbedding({ input: summary });
-
-          tokenAccumulator.fileEmbeddingInputTokens += embeddingUsage.inputTokens;
-          tokenAccumulator.fileEmbeddingCallCount += 1;
-
-          const repositoryFile = await this.prisma.repositoryFile.create({
-            data: {
-              projectId,
-              documentId: doc.documentId,
-              fullPath: logicalPath,
-              language,
-              rawContent,
-              summary,
-              checksum,
-              metadata: {
-                format: doc.format,
-                originalPath: doc.path,
-              },
-            },
-          });
-
-          await this._updateVectorEmbedding(repositoryFile.id, embedding);
-
-          totalFiles++;
-
-          const symbolCount = await this._extractSymbols(projectId, repositoryFile.id, parsed);
-          totalSymbols += symbolCount;
-
-          this.logger.log(`Indexed ${logicalPath}: ${symbolCount} symbols`);
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          const errorMsg = `Failed to index ${doc.path}: ${errorMessage}`;
-          this.logger.error(errorMsg);
-          errors.push(errorMsg);
         }
       }
 
-      // generate hierarchical summaries before reporting "complete" so callers can rely on Project.summary being populated when indexing returns
-      await this._hierarchicalSummariesGenerate(projectId, tokenAccumulator);
+      // split the shared topic assignments back to statements / action items / references by their offset in the list
+      const actionOffset = keptStatements.length;
+      const referenceOffset = actionOffset + keptActionItems.length;
+      const statementTopicName = topicNameByGroupingIndex.slice(0, actionOffset);
+      const actionTopicName = topicNameByGroupingIndex.slice(actionOffset, referenceOffset);
+      const referenceTopicName = topicNameByGroupingIndex.slice(referenceOffset);
 
-      const duration = this._formatDuration(Date.now() - startTime);
+      // resolve each kept statement's status/date and embed it BEFORE the transaction - embeddings are slow openai
+      // calls that must not run inside a db transaction, and statements with no topic group are dropped here
+      const statementRows: {
+        statement: (typeof keptStatements)[number];
+        topicName: string;
+        embedding: number[];
+        occurredAt: Date;
+        decisionStatus: ProjectDocumentDecisionStatus | null;
+        implementationStatus: ProjectDocumentImplementationStatus | null;
+      }[] = [];
 
-      this.logger.log(`Document indexing complete: ${totalFiles} files, ${totalSymbols} symbols (${duration})`);
+      for (let index = 0; index < keptStatements.length; index++) {
+        const statement = keptStatements[index];
+        const topicName = statementTopicName[index];
 
-      logIndexingCostBreakdown({
-        logger: this.logger,
-        context: `documents in project ${projectId}`,
-        accumulator: tokenAccumulator,
-      });
+        if (!topicName) {
+          this.logger.warn(`Skipping statement with no topic group in ${projectDocument.path}`);
+          continue;
+        }
 
-      return {
-        projectId,
-        totalFiles,
-        totalSymbols,
-        duration,
-        errors,
-      };
+        const decisionStatus =
+          (statement.type === ProjectDocumentStatementType.proposal ||
+            statement.type === ProjectDocumentStatementType.decision) &&
+          statement.decisionStatus &&
+          decisionStatuses.includes(statement.decisionStatus as ProjectDocumentDecisionStatus)
+            ? (statement.decisionStatus as ProjectDocumentDecisionStatus)
+            : null;
+        const implementationStatus =
+          statement.implementationStatus &&
+          implementationStatuses.includes(statement.implementationStatus as ProjectDocumentImplementationStatus)
+            ? (statement.implementationStatus as ProjectDocumentImplementationStatus)
+            : null;
+
+        // use the statement's own inferred date, falling back to the document's date
+        const inferredOccurredAt = statement.occurredAt ? new Date(statement.occurredAt) : null;
+        const occurredAt =
+          inferredOccurredAt && !Number.isNaN(inferredOccurredAt.getTime())
+            ? inferredOccurredAt
+            : projectDocument.occurredAt;
+
+        const { embedding } = await this.openaiService.generateEmbedding({ input: statement.textDerived });
+
+        statementRows.push({ statement, topicName, embedding, occurredAt, decisionStatus, implementationStatus });
+      }
+
+      // doc-topics come from the shared grouping, plus any option-topic names referenced by statements
+      const referencedTopicNames = [
+        ...topicNameByGroupingIndex.filter((name): name is string => !!name),
+        ...keptStatements.map((statement) => statement.optionTopicName ?? ""),
+      ].filter((name) => name.trim().length > 0);
+
+      const topicNameToId = new Map<string, string>();
+
+      // apply atomically: wipe the prior extraction and recreate it in one transaction, so a mid-write failure never
+      // leaves the document with its old extraction deleted and the new one only partially written
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.projectDocumentStatement.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+          // only wipe ai-extracted occurrences; human-pinned rows survive re-extraction
+          await tx.projectDocumentActionItem.deleteMany({
+            where: { projectDocumentId: projectDocument.id, origin: ProjectDataOrigin.ai },
+          });
+          await tx.projectDocumentReference.deleteMany({ where: { fromProjectDocumentId: projectDocument.id } });
+          await tx.projectDocumentTopic.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+
+          for (const name of new Set(referencedTopicNames)) {
+            const topic = await tx.projectDocumentTopic.create({
+              data: { projectId: projectDocument.projectId, projectDocumentId: projectDocument.id, name },
+            });
+            topicNameToId.set(name, topic.id);
+          }
+
+          for (const row of statementRows) {
+            const projectDocumentTopicId = topicNameToId.get(row.topicName);
+
+            if (!projectDocumentTopicId) {
+              continue;
+            }
+
+            const created = await tx.projectDocumentStatement.create({
+              data: {
+                projectId: projectDocument.projectId,
+                projectDocumentId: projectDocument.id,
+                projectDocumentTopicId,
+                textRaw: row.statement.textRaw,
+                textDerived: row.statement.textDerived,
+                type: row.statement.type as ProjectDocumentStatementType,
+                decisionStatus: row.decisionStatus,
+                implementationStatus: row.implementationStatus,
+                optionTopicId: row.statement.optionTopicName
+                  ? (topicNameToId.get(row.statement.optionTopicName) ?? null)
+                  : null,
+                reason: row.statement.reason,
+                replacesPriorStatementText: row.statement.replacesPriorStatementText,
+                actor: row.statement.actor,
+                occurredAt: row.occurredAt,
+                aiAnalysisOutput: JSON.stringify(row.statement),
+              },
+            });
+
+            // textDerivedEmbedding is an unsupported halfvec column so it is written via raw sql
+            await tx.$executeRaw`
+              UPDATE "ProjectDocumentStatement"
+              SET "textDerivedEmbedding" = ${`[${row.embedding.join(",")}]`}::halfvec
+              WHERE id = ${created.id}::uuid
+            `;
+          }
+
+          for (let index = 0; index < keptActionItems.length; index++) {
+            const actionItem = keptActionItems[index];
+            const topicName = actionTopicName[index];
+            const status = actionItemStatuses.includes(actionItem.status as ProjectDocumentActionItemStatus)
+              ? (actionItem.status as ProjectDocumentActionItemStatus)
+              : ProjectDocumentActionItemStatus.open;
+
+            await tx.projectDocumentActionItem.create({
+              data: {
+                projectId: projectDocument.projectId,
+                projectDocumentId: projectDocument.id,
+                projectDocumentTopicId: topicName ? (topicNameToId.get(topicName) ?? null) : null,
+                owner: actionItem.owner,
+                description: actionItem.description,
+                expectedBy: actionItem.expectedBy,
+                status,
+                blockedOn: actionItem.blockedOn,
+                reason: actionItem.reason,
+                textRaw: actionItem.textRaw,
+                aiAnalysisOutput: JSON.stringify(actionItem),
+              },
+            });
+          }
+
+          for (let index = 0; index < extraction.references.length; index++) {
+            const reference = extraction.references[index];
+            const topicName = referenceTopicName[index];
+
+            await tx.projectDocumentReference.create({
+              data: {
+                projectId: projectDocument.projectId,
+                fromProjectDocumentId: projectDocument.id,
+                projectDocumentTopicId: topicName ? (topicNameToId.get(topicName) ?? null) : null,
+                referentText: reference.referentText,
+                expectation: reference.expectation,
+                textRaw: reference.textRaw,
+              },
+            });
+          }
+        },
+        { timeout: 30000 },
+      );
+
+      this.logger.log(
+        `Extracted ${projectDocument.path}: kept ${statementRows.length}/${extraction.statements.length} statements, ${topicNameToId.size} topics, ${keptActionItems.length}/${extraction.actionItems.length} action items`,
+      );
+      return true;
     } catch (error) {
-      this.logger.error("Document indexing failed", error);
-      throw error;
+      // extraction is enrichment: log and leave the document indexed without statements rather than failing it
+      this.logger.error(`Failed to extract document ${projectDocument.path}`, error);
+      return false;
     }
   }
 
@@ -495,7 +752,11 @@ export class IndexingService {
     return count;
   }
 
-  async _extractCodeSymbols(projectId: string, repositoryFileId: string, metadata: Record<string, unknown>): Promise<number> {
+  async _extractCodeSymbols(
+    projectId: string,
+    repositoryFileId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<number> {
     const chunkType = typeof metadata.chunkType === "string" ? metadata.chunkType : undefined;
     const name = typeof metadata.name === "string" ? metadata.name : undefined;
 
@@ -589,7 +850,9 @@ export class IndexingService {
 
     this.logger.log(`Generating hierarchical summaries for project ${project.name} (${repositoryFiles.length} files)`);
 
-    const treeNodes = buildDirectoryTreeFromCodeFilePaths(repositoryFiles.map((repositoryFile) => repositoryFile.fullPath));
+    const treeNodes = buildDirectoryTreeFromCodeFilePaths(
+      repositoryFiles.map((repositoryFile) => repositoryFile.fullPath),
+    );
 
     const fullPathToDirectoryId = await this._directoriesUpsertFromTree(projectId, treeNodes);
 
@@ -693,7 +956,8 @@ export class IndexingService {
           const fileSummaries: OpenAiFileOrDirectoryPathSummary[] = repositoryFiles
             .filter(
               (repositoryFile) =>
-                findContainingDirectoryFullPath(repositoryFile.fullPath) === directoryNode.fullPath && repositoryFile.summary,
+                findContainingDirectoryFullPath(repositoryFile.fullPath) === directoryNode.fullPath &&
+                repositoryFile.summary,
             )
             .map((repositoryFile) => ({ fullPath: repositoryFile.fullPath, summary: repositoryFile.summary! }));
 

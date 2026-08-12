@@ -44,7 +44,7 @@ export class StytchService {
     const audiences = Array.isArray(claims.audience) ? claims.audience : [claims.audience];
 
     if (!expectedAudience || !audiences.includes(expectedAudience)) {
-      throw new Error(`Token audience [${audiences.join(", ")}] does not match project ${expectedAudience}`);
+      throw new Error(`Token audience [${audiences.join(", ")}] does not match project ${expectedAudience ?? ""}`);
     }
 
     const user = await client.users.get({ user_id: claims.subject });
