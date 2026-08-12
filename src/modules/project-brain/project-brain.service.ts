@@ -35,6 +35,20 @@ type ProjectBrainStatementRow = {
   documentType: string;
 };
 
+type ProjectBrainDocumentSearchRow = {
+  id: string;
+  name: string;
+  path: string;
+  type: string;
+  occurredAt: Date;
+  summary: string | null;
+  similarity: number;
+};
+
+const MAX_READ_DOCUMENT_LINES = 1500;
+const MAX_DOCUMENT_TEXT_SEARCH_RESULTS = 20;
+const MAX_DOCUMENT_TEXT_SEARCH_EXCERPTS = 5;
+
 @Injectable()
 export class ProjectBrainService {
   readonly logger = new Logger(ProjectBrainService.name);
@@ -66,9 +80,7 @@ export class ProjectBrainService {
         ...(owner ? { owner: { contains: owner, mode: "insensitive" } } : {}),
 
         // canonical items link to a topic only through their per-document members
-        ...(topicId
-          ? { documentActionItems: { some: { projectDocumentTopic: { projectTopicId: topicId } } } }
-          : {}),
+        ...(topicId ? { documentActionItems: { some: { projectDocumentTopic: { projectTopicId: topicId } } } } : {}),
       },
       orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
       select: {
@@ -170,6 +182,207 @@ export class ProjectBrainService {
       ...rest,
       document: { name: documentName, occurredAt: documentOccurredAt, type: documentType },
     }));
+  }
+
+  async documentSearch({
+    projectId,
+    query,
+    type,
+    topK = 5,
+  }: {
+    projectId: string;
+    query: string;
+    type?: string;
+    topK?: number;
+  }) {
+    const { embedding } = await this.openaiService.generateEmbedding({ input: query });
+    const vector = `[${embedding.join(",")}]`;
+
+    return this.prisma.$queryRaw<ProjectBrainDocumentSearchRow[]>`
+      SELECT
+        d.id, d.name, d.path, d.type, d."occurredAt", d.summary,
+        1 - (d."summaryEmbedding" <=> ${vector}::halfvec) AS similarity
+      FROM "ProjectDocument" d
+      WHERE d."projectId" = ${projectId}::uuid
+        AND d."summaryEmbedding" IS NOT NULL
+        ${type ? Prisma.sql`AND d.type = ${type}::"ProjectDocumentType"` : Prisma.empty}
+      ORDER BY d."summaryEmbedding" <=> ${vector}::halfvec
+      LIMIT ${topK}
+    `;
+  }
+
+  async documentTextSearch({ projectId, query }: { projectId: string; query: string }) {
+    const documents = await this.prisma.projectDocument.findMany({
+      where: { projectId, contentRaw: { contains: query, mode: "insensitive" } },
+      select: { id: true, name: true, path: true, type: true, occurredAt: true, contentRaw: true },
+      take: MAX_DOCUMENT_TEXT_SEARCH_RESULTS,
+      orderBy: { occurredAt: "desc" },
+    });
+    const normalizedQuery = query.toLocaleLowerCase();
+
+    return documents.map((document) => {
+      const excerpts = document.contentRaw
+        .split("\n")
+        .flatMap((line, index) =>
+          line.toLocaleLowerCase().includes(normalizedQuery) ? [`${index + 1}: ${line.trim()}`] : [],
+        )
+        .slice(0, MAX_DOCUMENT_TEXT_SEARCH_EXCERPTS);
+
+      return {
+        document: {
+          id: document.id,
+          name: document.name,
+          path: document.path,
+          type: document.type,
+          occurredAt: document.occurredAt,
+        },
+        excerpts,
+      };
+    });
+  }
+
+  async documentRead({
+    projectId,
+    documentId,
+    statementId,
+  }: {
+    projectId: string;
+    documentId?: string;
+    statementId?: string;
+  }) {
+    const statement = statementId
+      ? await this.prisma.projectDocumentStatement.findFirst({
+          where: { id: statementId, projectId },
+          select: { id: true, projectDocumentId: true, textRaw: true, textDerived: true },
+        })
+      : null;
+
+    if (statementId && !statement) {
+      throw new Error(`Statement ${statementId} not found in project ${projectId}`);
+    }
+
+    if (documentId && statement && documentId !== statement.projectDocumentId) {
+      throw new Error(`Statement ${statementId} does not belong to document ${documentId}`);
+    }
+
+    const resolvedDocumentId = documentId ?? statement?.projectDocumentId;
+
+    if (!resolvedDocumentId) {
+      throw new Error("documentId or statementId is required");
+    }
+
+    const document = await this.prisma.projectDocument.findFirst({
+      where: { id: resolvedDocumentId, projectId },
+      select: { id: true, name: true, path: true, type: true, occurredAt: true, contentRaw: true },
+    });
+
+    if (!document) {
+      throw new Error(`Document ${resolvedDocumentId} not found in project ${projectId}`);
+    }
+
+    return {
+      document: {
+        id: document.id,
+        name: document.name,
+        path: document.path,
+        type: document.type,
+        occurredAt: document.occurredAt,
+      },
+      ...(statement && {
+        statement: {
+          id: statement.id,
+          textRaw: statement.textRaw,
+          textDerived: statement.textDerived,
+          sourceTextLocated: this._statementSourceOffset(document.contentRaw, statement) !== null,
+        },
+      }),
+      content: document.contentRaw,
+      totalLines: document.contentRaw.split("\n").length,
+    };
+  }
+
+  async documentReadRange({
+    projectId,
+    documentId,
+    statementId,
+    startLine,
+    endLine,
+  }: {
+    projectId: string;
+    documentId?: string;
+    statementId?: string;
+    startLine?: number;
+    endLine?: number;
+  }) {
+    const documentResult = await this.documentRead({ projectId, documentId, statementId });
+    const lines = documentResult.content.split("\n");
+    const statement = documentResult.statement;
+    const sourceOffset =
+      statement && statementId
+        ? this._statementSourceOffset(documentResult.content, {
+            textRaw: statement.textRaw,
+            textDerived: statement.textDerived,
+          })
+        : null;
+    const statementLine =
+      sourceOffset === null ? null : documentResult.content.slice(0, sourceOffset).split("\n").length;
+    const rangeStart = startLine ?? Math.max(1, (statementLine ?? 1) - 20);
+    const requestedEnd = endLine ?? (statementLine ?? rangeStart) + 20;
+
+    if (
+      !Number.isInteger(rangeStart) ||
+      !Number.isInteger(requestedEnd) ||
+      rangeStart < 1 ||
+      requestedEnd < rangeStart
+    ) {
+      throw new Error(
+        `Invalid line range: startLine=${rangeStart}, endLine=${requestedEnd}. Must satisfy 1 <= startLine <= endLine.`,
+      );
+    }
+
+    const clampedEnd = Math.min(requestedEnd, lines.length);
+    const cappedEnd = Math.min(clampedEnd, rangeStart + MAX_READ_DOCUMENT_LINES - 1);
+    const truncated = cappedEnd < clampedEnd;
+    let content = lines.slice(rangeStart - 1, cappedEnd).join("\n");
+
+    if (truncated) {
+      content += `\n\n[range capped at line ${cappedEnd} (${MAX_READ_DOCUMENT_LINES} max) - call projectDocumentReadRange again with a later startLine to continue]`;
+    }
+
+    return {
+      ...documentResult,
+      content,
+      totalLines: lines.length,
+      range: { startLine: rangeStart, endLine: cappedEnd, truncated },
+    };
+  }
+
+  // extraction usually retains the source wording in textRaw; textDerived is a fallback for extractors that do not.
+  _statementSourceOffset(content: string, statement: { textRaw: string; textDerived: string }): number | null {
+    for (const candidate of [statement.textRaw, statement.textDerived]) {
+      const exactOffset = content.indexOf(candidate);
+
+      if (exactOffset >= 0) {
+        return exactOffset;
+      }
+
+      const whitespaceFlexible = candidate
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/\s+/g, "\\s+");
+
+      if (whitespaceFlexible.length === 0) {
+        continue;
+      }
+
+      const match = new RegExp(whitespaceFlexible, "i").exec(content);
+
+      if (match?.index !== undefined) {
+        return match.index;
+      }
+    }
+
+    return null;
   }
 
   async referenceList({

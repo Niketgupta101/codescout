@@ -12,6 +12,16 @@ import { ProjectActionItemUpdateInput, ProjectActionItemUpdateSchema } from "./d
 import { ProjectTopicCorrectInput, ProjectTopicCorrectSchema } from "./dto/project-topic-correct.schema";
 import { ProjectStatementCorrectInput, ProjectStatementCorrectSchema } from "./dto/project-statement-correct.schema";
 import { ProjectReferenceCorrectInput, ProjectReferenceCorrectSchema } from "./dto/project-reference-correct.schema";
+import { ProjectDocumentReadInput, ProjectDocumentReadSchema } from "./dto/project-document-read.schema";
+import {
+  ProjectDocumentReadRangeInput,
+  ProjectDocumentReadRangeSchema,
+} from "./dto/project-document-read-range.schema";
+import { ProjectDocumentSearchInput, ProjectDocumentSearchSchema } from "./dto/project-document-search.schema";
+import {
+  ProjectDocumentTextSearchInput,
+  ProjectDocumentTextSearchSchema,
+} from "./dto/project-document-text-search.schema";
 
 @Injectable()
 export class ProjectBrainMcp {
@@ -95,6 +105,116 @@ export class ProjectBrainMcp {
       implementationStatus: projectStatementSearchInput.implementationStatus,
       includeSuperseded: projectStatementSearchInput.includeSuperseded,
       limit: projectStatementSearchInput.limit,
+    });
+  }
+
+  @Tool({
+    name: "projectDocumentSearch",
+    description:
+      "Semantic search over indexed source-document summaries, independent of statement extraction. " +
+      "Use when projectStatementSearch is insufficient, then pass a result's documentId to projectDocumentRead or projectDocumentReadRange. " +
+      "This is the source-document fallback for questions whose details were not extracted into statements.",
+    parameters: ProjectDocumentSearchSchema,
+  })
+  async projectDocumentSearch(
+    projectDocumentSearchInput: ProjectDocumentSearchInput,
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectDocumentSearchInput.projectId,
+      gitRemoteUrl: projectDocumentSearchInput.gitRemoteUrl,
+      actor,
+    });
+
+    return this.projectBrainService.documentSearch({
+      projectId: project.id,
+      query: projectDocumentSearchInput.query,
+      type: projectDocumentSearchInput.type,
+      topK: projectDocumentSearchInput.topK,
+    });
+  }
+
+  @Tool({
+    name: "projectDocumentTextSearch",
+    description:
+      "Literal case-insensitive search over imported raw source text. " +
+      "Use when an exact name, identifier, or phrase may have been missed by statement extraction or semantic document search. " +
+      "Returns document IDs and line-numbered excerpts to pass directly to projectDocumentReadRange.",
+    parameters: ProjectDocumentTextSearchSchema,
+  })
+  async projectDocumentTextSearch(
+    projectDocumentTextSearchInput: ProjectDocumentTextSearchInput,
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectDocumentTextSearchInput.projectId,
+      gitRemoteUrl: projectDocumentTextSearchInput.gitRemoteUrl,
+      actor,
+    });
+
+    return this.projectBrainService.documentTextSearch({
+      projectId: project.id,
+      query: projectDocumentTextSearchInput.query,
+    });
+  }
+
+  @Tool({
+    name: "projectDocumentRead",
+    description:
+      "Read the FULL raw source text of a single indexed project document. " +
+      "Use for short documents when the extracted statements are insufficient or need verification. " +
+      "For large documents, use projectDocumentReadRange instead; retrieve its documentId from projectDocumentSearch or projectStatementSearch.",
+    parameters: ProjectDocumentReadSchema,
+  })
+  async projectDocumentRead(
+    projectDocumentReadInput: ProjectDocumentReadInput,
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectDocumentReadInput.projectId,
+      gitRemoteUrl: projectDocumentReadInput.gitRemoteUrl,
+      actor,
+    });
+
+    return this.projectBrainService.documentRead({
+      projectId: project.id,
+      documentId: projectDocumentReadInput.documentId,
+      statementId: projectDocumentReadInput.statementId,
+    });
+  }
+
+  @Tool({
+    name: "projectDocumentReadRange",
+    description:
+      "Read a specific line range from an indexed source document (1-indexed, inclusive). Returns at most 1500 lines. " +
+      "PRIMARY TOOL for large documents: use projectDocumentSearch first, then read only the relevant source range. " +
+      "You can instead pass statementId to return the source lines around that extracted statement when its wording is found.",
+    parameters: ProjectDocumentReadRangeSchema,
+  })
+  async projectDocumentReadRange(
+    projectDocumentReadRangeInput: ProjectDocumentReadRangeInput,
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectDocumentReadRangeInput.projectId,
+      gitRemoteUrl: projectDocumentReadRangeInput.gitRemoteUrl,
+      actor,
+    });
+
+    return this.projectBrainService.documentReadRange({
+      projectId: project.id,
+      documentId: projectDocumentReadRangeInput.documentId,
+      statementId: projectDocumentReadRangeInput.statementId,
+      startLine: projectDocumentReadRangeInput.startLine,
+      endLine: projectDocumentReadRangeInput.endLine,
     });
   }
 
