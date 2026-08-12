@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: codescout-backend
+    runtime: image
+    repo: https://github.com/Niketgupta101/codescout
+    image: ghcr.io/niketgupta101/codescout:latest
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 4000
+      - key: NODE_ENV
+        value: production
+    autoDeploy: true
+    branch: main
