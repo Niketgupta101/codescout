@@ -10,6 +10,7 @@ import {
   ProjectDocumentImplementationStatus,
   ProjectDocumentActionItemStatus,
   ProjectTopicType,
+  ProjectDataOrigin,
 } from "@prisma/client";
 import { GithubService } from "../github/github.service";
 import { RepositoriesService } from "../repositories/repositories.service";
@@ -27,6 +28,12 @@ import { buildEmptyIndexingTokenAccumulator, logIndexingCostBreakdown } from "./
 import { buildRepositoryIndexFileFilter } from "./utils/repository-file-filter.util";
 import { detectNextJsFileMetadata } from "./utils/detect-nextjs-file-metadata.util";
 import { OpenAiFileOrDirectoryPathSummary } from "../openai/types/openai-file-or-directory-path-summary.type";
+import {
+  filterRetrievalReadyActionItems,
+  filterRetrievalReadyStatements,
+  filterStatementsDuplicatedByActions,
+} from "./utils/extraction-quality.util";
+import { selectDocumentExtractionContents } from "./utils/document-extraction-content.util";
 
 const CHUNK_TYPE_TO_SYMBOL_TYPE: Record<string, SymbolType> = {
   function: SymbolType.function,
@@ -149,8 +156,18 @@ export class IndexingService {
    * Non-critical: on failure the document stays indexed without statements rather than failing.
    * @param projectDocumentId - the document to extract from
    */
-  async projectDocumentExtract(projectDocumentId: string): Promise<void> {
-    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
+  async projectDocumentExtract(projectDocumentId: string): Promise<boolean> {
+    const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({
+      where: { id: projectDocumentId },
+      include: {
+        project: {
+          select: {
+            name: true,
+            description: true,
+          },
+        },
+      },
+    });
 
     this.logger.log(`Extracting document ${projectDocument.path}`);
 
@@ -166,10 +183,26 @@ export class IndexingService {
     );
 
     try {
+      const projectContext = [
+        `Project name: ${projectDocument.project.name}`,
+        projectDocument.project.description ? `Description: ${projectDocument.project.description}` : null,
+      ]
+        .filter((line): line is string => !!line)
+        .join("\n")
+        .slice(0, 8000);
+      const extractionContents = selectDocumentExtractionContents(projectDocument.contentRaw);
+      if (extractionContents.usedCuratedSections) {
+        this.logger.log(
+          `Using structured meeting sections for ${projectDocument.path}: ${extractionContents.statementContent.length} statement characters, ${extractionContents.actionContent.length} action characters, ${projectDocument.contentRaw.length} raw characters`,
+        );
+      }
+
       // extraction produces statements liberally; its own topic enumeration is discarded in favor of grouping below
       const { extraction } = await this.openaiService.generateDocumentExtraction({
-        content: projectDocument.contentRaw,
+        content: extractionContents.statementContent,
+        actionContent: extractionContents.actionContent,
         name: projectDocument.name,
+        projectContext,
         documentType: projectDocument.type,
         enums: {
           statementType: Object.values(ProjectDocumentStatementType),
@@ -179,19 +212,37 @@ export class IndexingService {
         },
       });
 
-      // filter statements and action items down to substantive, non-redundant knowledge (drops ephemeral/rubbish)
-      const keptStatements = await this._filterByValue({
-        items: extraction.statements,
-        toText: (statement) => statement.textDerived,
-        name: projectDocument.name,
-        documentType: projectDocument.type,
-      });
-      const keptActionItems = await this._filterByValue({
-        items: extraction.actionItems,
-        toText: (actionItem) => actionItem.description,
-        name: projectDocument.name,
-        documentType: projectDocument.type,
-      });
+      // Statements and actions have different quality contracts. Curate them independently so fragments can be merged,
+      // vague text can be rewritten from its source, and requirements do not leak into the action-item list.
+      const curateStatements = () =>
+        this.openaiService.generateStatementCuration({
+          statements: extraction.statements,
+          name: projectDocument.name,
+          projectContext,
+          documentType: projectDocument.type,
+          enums: {
+            statementType: Object.values(ProjectDocumentStatementType),
+            decisionStatus: decisionStatuses,
+            implementationStatus: implementationStatuses,
+          },
+        });
+      const curateActionItems = () =>
+        this.openaiService.generateActionItemCuration({
+          actionItems: extraction.actionItems,
+          name: projectDocument.name,
+          projectContext,
+          documentType: projectDocument.type,
+          enums: { actionItemStatus: actionItemStatuses },
+        });
+      const [statementCuration, actionItemCuration] =
+        this.openaiService.inferenceConcurrency === 1
+          ? [await curateStatements(), await curateActionItems()]
+          : await Promise.all([curateStatements(), curateActionItems()]);
+      const keptActionItems = filterRetrievalReadyActionItems(actionItemCuration.actionItems);
+      const keptStatements = filterStatementsDuplicatedByActions(
+        filterRetrievalReadyStatements(statementCuration.statements),
+        keptActionItems,
+      );
 
       // group statements, action items, and references together into shared doc-topics, so actions and references
       // route to the grouped topics instead of the raw extraction's per-item names
@@ -246,7 +297,10 @@ export class IndexingService {
         }
 
         const decisionStatus =
-          statement.decisionStatus && decisionStatuses.includes(statement.decisionStatus as ProjectDocumentDecisionStatus)
+          (statement.type === ProjectDocumentStatementType.proposal ||
+            statement.type === ProjectDocumentStatementType.decision) &&
+          statement.decisionStatus &&
+          decisionStatuses.includes(statement.decisionStatus as ProjectDocumentDecisionStatus)
             ? (statement.decisionStatus as ProjectDocumentDecisionStatus)
             : null;
         const implementationStatus =
@@ -280,7 +334,10 @@ export class IndexingService {
       await this.prisma.$transaction(
         async (tx) => {
           await tx.projectDocumentStatement.deleteMany({ where: { projectDocumentId: projectDocument.id } });
-          await tx.projectDocumentActionItem.deleteMany({ where: { projectDocumentId: projectDocument.id } });
+          // only wipe ai-extracted occurrences; human-pinned rows survive re-extraction
+          await tx.projectDocumentActionItem.deleteMany({
+            where: { projectDocumentId: projectDocument.id, origin: ProjectDataOrigin.ai },
+          });
           await tx.projectDocumentReference.deleteMany({ where: { fromProjectDocumentId: projectDocument.id } });
           await tx.projectDocumentTopic.deleteMany({ where: { projectDocumentId: projectDocument.id } });
 
@@ -373,37 +430,12 @@ export class IndexingService {
       this.logger.log(
         `Extracted ${projectDocument.path}: kept ${statementRows.length}/${extraction.statements.length} statements, ${topicNameToId.size} topics, ${keptActionItems.length}/${extraction.actionItems.length} action items`,
       );
+      return true;
     } catch (error) {
       // extraction is enrichment: log and leave the document indexed without statements rather than failing it
       this.logger.error(`Failed to extract document ${projectDocument.path}`, error);
+      return false;
     }
-  }
-
-  // filters a list of extracted items down to the substantive ones via the value filter, preserving order
-  async _filterByValue<T>({
-    items,
-    toText,
-    name,
-    documentType,
-  }: {
-    items: T[];
-    toText: (item: T) => string;
-    name: string;
-    documentType: string;
-  }): Promise<T[]> {
-    if (items.length === 0) {
-      return [];
-    }
-
-    const { decisions } = await this.openaiService.generateStatementFilter({
-      statements: items.map(toText),
-      name,
-      documentType,
-    });
-
-    const keepIndices = new Set(decisions.filter((decision) => decision.keep).map((decision) => decision.index));
-
-    return items.filter((_, index) => keepIndices.has(index));
   }
 
   async indexRepository(

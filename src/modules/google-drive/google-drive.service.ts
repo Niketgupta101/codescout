@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { google, drive_v3 } from "googleapis";
+import * as path from "path";
 import { EnvService } from "../env/env.service";
 import type { GoogleDriveFile } from "./types/google-drive-file.type";
 import type { GoogleServiceAccountCredentials } from "./types/google-service-account-credentials.type";
@@ -8,6 +9,44 @@ const DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 // drive file/folder ids are url-safe; reject anything else so an id can't break out of the search query
 const DRIVE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+type DriveContentFormat = {
+  extension: string;
+  exportMimeType?: string;
+};
+
+const DRIVE_CONTENT_FORMATS: Record<string, DriveContentFormat> = {
+  "text/markdown": { extension: ".md" },
+  "text/plain": { extension: ".txt" },
+  "text/csv": { extension: ".csv" },
+  "text/html": { extension: ".html" },
+  "application/xhtml+xml": { extension: ".html" },
+  "application/pdf": { extension: ".pdf" },
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": { extension: ".docx" },
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": { extension: ".xlsx" },
+  "application/vnd.google-apps.document": {
+    extension: ".docx",
+    exportMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  },
+  "application/vnd.google-apps.spreadsheet": {
+    extension: ".xlsx",
+    exportMimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  },
+  "application/vnd.google-apps.presentation": {
+    extension: ".pdf",
+    exportMimeType: "application/pdf",
+  },
+  "application/vnd.google-apps.drawing": {
+    extension: ".pdf",
+    exportMimeType: "application/pdf",
+  },
+};
+
+export type DownloadedGoogleDriveFile = {
+  buffer: Buffer;
+  filename: string;
+  contentType: string;
+};
 
 @Injectable()
 export class GoogleDriveService {
@@ -26,20 +65,32 @@ export class GoogleDriveService {
     return this._listFolderRecursive({ drive, folderId: listFolderFilesInput.folderId, parentPath: "" });
   }
 
-  /**
-   * Downloads a drive file's raw bytes.
-   * @param downloadFileInput - the file id to download
-   * @returns The file content as a buffer.
-   */
-  async downloadFile(downloadFileInput: { fileId: string }): Promise<Buffer> {
-    this._assertValidDriveId(downloadFileInput.fileId);
+  /** Downloads stored files directly and exports native Google Workspace files. */
+  async downloadFile(downloadFileInput: {
+    file: Pick<GoogleDriveFile, "id" | "name" | "mimeType">;
+  }): Promise<DownloadedGoogleDriveFile> {
+    const { file } = downloadFileInput;
+    this._assertValidDriveId(file.id);
     const drive = this._getDriveClient();
-    const response = await drive.files.get(
-      { fileId: downloadFileInput.fileId, alt: "media" },
-      { responseType: "arraybuffer" },
-    );
+    const normalizedMimeType = file.mimeType.split(";", 1)[0].trim().toLowerCase();
+    const format = DRIVE_CONTENT_FORMATS[normalizedMimeType];
+    const extension = format?.extension ?? path.extname(file.name).toLowerCase();
 
-    return Buffer.from(response.data as ArrayBuffer);
+    if (!extension) {
+      throw new Error(`cannot determine conversion extension for ${file.name} (${file.mimeType})`);
+    }
+
+    const response = format?.exportMimeType
+      ? await drive.files.export({ fileId: file.id, mimeType: format.exportMimeType }, { responseType: "arraybuffer" })
+      : await drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "arraybuffer" });
+
+    const filename = file.name.toLowerCase().endsWith(extension) ? file.name : `${file.name}${extension}`;
+
+    return {
+      buffer: Buffer.from(response.data as ArrayBuffer),
+      filename,
+      contentType: extension.slice(1),
+    };
   }
 
   /**

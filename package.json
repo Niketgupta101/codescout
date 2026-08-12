@@ -145,9 +145,6 @@
         }
       ]
     ],
-    "setupFilesAfterEnv": [
-      "<rootDir>/test/jest.setup.ts",
-      "<rootDir>/test/custom-definitions.ts"
-    ]
+    "setupFilesAfterEnv": []
   }
 }

@@ -9,6 +9,7 @@ import { GithubModule } from "./modules/github/github.module";
 import { RepositoriesModule } from "./modules/repositories/repositories.module";
 import { ProjectFoldersModule } from "./modules/project-folders/project-folders.module";
 import { ProjectReconcileModule } from "./modules/project-reconcile/project-reconcile.module";
+import { ProjectBrainModule } from "./modules/project-brain/project-brain.module";
 import { AgentModule } from "./modules/agent/agent.module";
 import { ChatModule } from "./modules/chat/chat.module";
 import { ConversationsModule } from "./modules/conversations/conversations.module";
@@ -70,6 +71,7 @@ import { RequestWithUser } from "./modules/auth/types/request-with-user.type";
     RepositoriesModule,
     ProjectFoldersModule,
     ProjectReconcileModule,
+    ProjectBrainModule,
     AnthropicModule,
     LLMModule,
     AgentModule,

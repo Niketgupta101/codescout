@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import * as path from "path";
 import { MarkItDown } from "markitdown-ts";
-import { MARKITDOWN_SUPPORTED_EXTENSIONS } from "./markitdown.constants";
+import { MARKITDOWN_SUPPORTED_EXTENSIONS, MARKITDOWN_SUPPORTED_MIME_TYPES } from "./markitdown.constants";
 import type { MarkitdownResult } from "./types/markitdown-result.type";
 
 @Injectable()
@@ -12,9 +12,14 @@ export class MarkitdownService {
   /**
    * Whether markitdown can convert this file into markdown; everything else is skipped upstream.
    */
-  isSupported(filename: string): boolean {
+  isSupportedExtension(filename: string): boolean {
     const extension = path.extname(filename).toLowerCase();
     return MARKITDOWN_SUPPORTED_EXTENSIONS.includes(extension);
+  }
+
+  isSupportedMimeType(mimeType: string): boolean {
+    const normalizedMimeType = mimeType.split(";", 1)[0].trim().toLowerCase();
+    return MARKITDOWN_SUPPORTED_MIME_TYPES.includes(normalizedMimeType);
   }
 
   /**

@@ -10,6 +10,8 @@ export class ProjectReconcileController {
 
   @Post()
   async reconcile(@Param("projectId") projectId: string) {
-    return this.projectReconcileService.reconcile(projectId);
+    const result = await this.projectReconcileService.canonicalize(projectId);
+
+    return { projectId, ...result };
   }
 }

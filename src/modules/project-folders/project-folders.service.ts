@@ -85,16 +85,24 @@ export class ProjectFolderService {
   }
 
   // crawls a linked google drive folder, routing each supported file to create or re-import
-  async _googleDriveProjectFolderImport(projectFolder: ProjectFolder, force: boolean): Promise<ProjectFolderImportResult> {
+  async _googleDriveProjectFolderImport(
+    projectFolder: ProjectFolder,
+    force: boolean,
+  ): Promise<ProjectFolderImportResult> {
     const files = await this.googleDriveService.listFolderFiles({ folderId: projectFolder.providerId });
 
     this.logger.log(`Importing ${files.length} drive files for project ${projectFolder.projectId}`);
 
     const issues: ProjectFolderImportIssue[] = [];
+    let documentsChanged = 0;
 
     for (const [index, file] of files.entries()) {
       // skip unsupported files
-      if (!this.markitdownService.isSupported(file.name)) {
+      const isSupported =
+        this.markitdownService.isSupportedMimeType(file.mimeType) ||
+        this.markitdownService.isSupportedExtension(file.name);
+
+      if (!isSupported) {
         issues.push({ path: file.path, status: "skipped", reason: "unsupported file type" });
         continue;
       }
@@ -121,6 +129,7 @@ export class ProjectFolderService {
 
         try {
           await this.projectDocumentService.importProjectDocument(projectDocument);
+          documentsChanged++;
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.logger.error(`Failed to re-import drive file ${file.path}`, error);
@@ -137,6 +146,7 @@ export class ProjectFolderService {
             provider: "googleDrive",
             providerExternalId: file.id,
           });
+          documentsChanged++;
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.logger.error(`Failed to import drive file ${file.path}`, error);
@@ -151,13 +161,19 @@ export class ProjectFolderService {
       data: { lastSyncedAt: new Date() },
     });
 
-    // reconcile the project's relational layer once all documents in this sync are extracted
-    try {
-      this.logger.log(`All files processed, reconciling project ${projectFolder.projectId}`);
-      await this.projectReconcileService.reconcile(projectFolder.projectId);
-    } catch (error) {
-      this.logger.error(`Failed to reconcile project ${projectFolder.projectId} after import`, error);
+    if (documentsChanged > 0) {
+      try {
+        this.logger.log(`Canonicalizing project ${projectFolder.projectId} after import`);
+        await this.projectReconcileService.canonicalize(projectFolder.projectId);
+      } catch (error) {
+        // importing source documents succeeds independently; this retryable enrichment must not mask it
+        this.logger.error(`Failed to canonicalize project ${projectFolder.projectId} after import`, error);
+      }
     }
+
+    this.logger.log(
+      `Project folder import completed with ${documentsChanged} changed document(s) for project ${projectFolder.projectId}`,
+    );
 
     return { projectFolderId: projectFolder.id, issues };
   }

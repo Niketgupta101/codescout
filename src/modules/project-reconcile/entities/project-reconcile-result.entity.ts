@@ -3,8 +3,9 @@ import { Expose } from "class-transformer";
 @Expose()
 export class ProjectReconcileResultEntity {
   projectId: string;
+  correctionsApplied: number;
   topicsCreated: number;
   topicsMatched: number;
-  statementsReconciled: number;
-  supersessionsLinked: number;
+  actionItemsCreated: number;
+  actionItemsMatched: number;
 }

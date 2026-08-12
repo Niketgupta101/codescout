@@ -1,6 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { createHash } from "crypto";
-import * as path from "path";
 import type { ProjectDocument } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { GoogleDriveService } from "../google-drive/google-drive.service";
@@ -28,15 +27,14 @@ export class ProjectDocumentService {
       }
 
       const file = await this.googleDriveService.getFile({ fileId: providerExternalId });
-      const buffer = await this.googleDriveService.downloadFile({ fileId: providerExternalId });
-      const { markdown: rawMarkdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      const downloadedFile = await this.googleDriveService.downloadFile({ file });
+      const { markdown: rawMarkdown } = await this.markitdownService.convert(downloadedFile);
       // strip null bytes at the ingestion boundary so postgres text columns accept the content
       const markdown = stripNullBytes(rawMarkdown);
 
       const checksum = createHash("sha256").update(markdown).digest("hex");
       // provisional; classify infers the real event date from the content
       const occurredAt = file.modifiedAt ?? new Date();
-      const contentType = path.extname(file.name).replace(/^\./, "").toLowerCase();
 
       const projectDocument = await this.prisma.projectDocument.create({
         data: {
@@ -46,7 +44,7 @@ export class ProjectDocumentService {
           providerExternalId,
           name: file.name,
           path: file.path,
-          contentType,
+          contentType: downloadedFile.contentType,
           contentRaw: markdown,
           occurredAt,
           checksum,
@@ -83,22 +81,21 @@ export class ProjectDocumentService {
 
     try {
       const file = await this.googleDriveService.getFile({ fileId: projectDocument.providerExternalId });
-      const buffer = await this.googleDriveService.downloadFile({ fileId: projectDocument.providerExternalId });
-      const { markdown: rawMarkdown } = await this.markitdownService.convert({ buffer, filename: file.name });
+      const downloadedFile = await this.googleDriveService.downloadFile({ file });
+      const { markdown: rawMarkdown } = await this.markitdownService.convert(downloadedFile);
       // strip null bytes at the ingestion boundary so postgres text columns accept the content
       const markdown = stripNullBytes(rawMarkdown);
 
       const checksum = createHash("sha256").update(markdown).digest("hex");
       // provisional; classify infers the real event date from the content
       const occurredAt = file.modifiedAt ?? new Date();
-      const contentType = path.extname(file.name).replace(/^\./, "").toLowerCase();
 
       updated = await this.prisma.projectDocument.update({
         where: { id: projectDocument.id },
         data: {
           name: file.name,
           path: file.path,
-          contentType,
+          contentType: downloadedFile.contentType,
           contentRaw: markdown,
           occurredAt,
           checksum,

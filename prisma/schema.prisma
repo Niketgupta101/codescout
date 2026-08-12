@@ -66,7 +66,9 @@ model Project {
   projectDocumentTopics      ProjectDocumentTopic[]
   projectDocumentStatements  ProjectDocumentStatement[]
   projectDocumentActionItems ProjectDocumentActionItem[]
+  projectActionItems         ProjectActionItem[]
   projectDocumentReferences  ProjectDocumentReference[]
+  projectDocumentCorrections ProjectDocumentCorrection[]
   decisionRecords            DecisionRecord[]
 }
 
@@ -108,23 +110,24 @@ enum RepositoryFileLanguage {
 }
 
 model RepositoryFile {
-  id               String                        @id @default(uuid()) @db.Uuid
-  projectId        String                        @db.Uuid
-  project          Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  repositoryId     String                        @db.Uuid
-  repository       Repository                    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
-  directoryId      String?                       @db.Uuid
-  directory        RepositoryDirectory?          @relation(fields: [directoryId], references: [id], onDelete: SetNull)
-  fullPath         String
-  language         RepositoryFileLanguage
-  rawContent       String                        @db.Text
-  summary          String?                       @db.Text
-  summaryEmbedding Unsupported("halfvec(3072)")?
-  metadata         Json?
-  checksum         String?
-  createdAt        DateTime                      @default(now())
-  updatedAt        DateTime                      @updatedAt
-  symbols          RepositoryFileSymbol[]
+  id                           String                        @id @default(uuid()) @db.Uuid
+  projectId                    String                        @db.Uuid
+  project                      Project                       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  repositoryId                 String                        @db.Uuid
+  repository                   Repository                    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  directoryId                  String?                       @db.Uuid
+  directory                    RepositoryDirectory?          @relation(fields: [directoryId], references: [id], onDelete: SetNull)
+  fullPath                     String
+  language                     RepositoryFileLanguage
+  rawContent                   String                        @db.Text
+  summary                      String?                       @db.Text
+  summaryEmbedding             Unsupported("halfvec(3072)")?
+  metadata                     Json?
+  checksum                     String?
+  createdAt                    DateTime                      @default(now())
+  updatedAt                    DateTime                      @updatedAt
+  symbols                      RepositoryFileSymbol[]
+  resolvedCanonicalActionItems ProjectActionItem[]           @relation("ProjectActionItemResolvedByFile")
 
   @@unique([projectId, fullPath])
   @@index([projectId, language])
@@ -258,13 +261,15 @@ model ProjectDocument {
   supersedesDocument    ProjectDocument?  @relation("ProjectDocumentVersionLineage", fields: [supersedesDocumentId], references: [id], onDelete: SetNull)
   supersededByDocuments ProjectDocument[] @relation("ProjectDocumentVersionLineage")
 
-  topics               ProjectDocumentTopic[]
-  statements           ProjectDocumentStatement[]
-  actionItems          ProjectDocumentActionItem[] @relation("ActionItemDocument")
-  resolvedActionItems  ProjectDocumentActionItem[] @relation("ActionItemResolvedBy")
-  referencesFrom       ProjectDocumentReference[]  @relation("ReferenceFromDocument")
-  referencesResolvedTo ProjectDocumentReference[]  @relation("ReferenceResolvedToDocument")
-  relatedProjectTopics ProjectTopic[]              @relation("ProjectTopicRelatedDocuments")
+  topics                       ProjectDocumentTopic[]
+  statements                   ProjectDocumentStatement[]
+  actionItems                  ProjectDocumentActionItem[] @relation("ActionItemDocument")
+  resolvedActionItems          ProjectDocumentActionItem[] @relation("ActionItemResolvedBy")
+  resolvedCanonicalActionItems ProjectActionItem[]         @relation("ProjectActionItemResolvedByDocument")
+  referencesFrom               ProjectDocumentReference[]  @relation("ReferenceFromDocument")
+  referencesResolvedTo         ProjectDocumentReference[]  @relation("ReferenceResolvedToDocument")
+  corrections                  ProjectDocumentCorrection[]
+  relatedProjectTopics         ProjectTopic[]              @relation("ProjectTopicRelatedDocuments")
 
   @@index([projectId, type])
   @@index([projectId, occurredAt])
@@ -339,6 +344,9 @@ model ProjectTopic {
   type             ProjectTopicType?
   summary          String?                       @db.Text
   summaryEmbedding Unsupported("halfvec(3072)")?
+  // human = a person renamed/retyped it, so canonicalization must not overwrite; suppressed hides it from queries
+  origin           ProjectDataOrigin             @default(ai)
+  suppressed       Boolean                       @default(false)
   createdAt        DateTime                      @default(now())
   updatedAt        DateTime                      @updatedAt
 
@@ -351,16 +359,18 @@ model ProjectTopic {
 
 // per-document occurrence of a topic; canonical link is optional (set by the reconciler)
 model ProjectDocumentTopic {
-  id                String          @id @default(uuid()) @db.Uuid
-  projectId         String          @db.Uuid
-  project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectDocumentId String          @db.Uuid
-  projectDocument   ProjectDocument @relation(fields: [projectDocumentId], references: [id], onDelete: Cascade)
-  projectTopicId    String?         @db.Uuid
-  projectTopic      ProjectTopic?   @relation(fields: [projectTopicId], references: [id], onDelete: SetNull)
+  id                String            @id @default(uuid()) @db.Uuid
+  projectId         String            @db.Uuid
+  project           Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectDocumentId String            @db.Uuid
+  projectDocument   ProjectDocument   @relation(fields: [projectDocumentId], references: [id], onDelete: Cascade)
+  projectTopicId    String?           @db.Uuid
+  projectTopic      ProjectTopic?     @relation(fields: [projectTopicId], references: [id], onDelete: SetNull)
   name              String
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  origin            ProjectDataOrigin @default(ai)
+  suppressed        Boolean           @default(false)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   statements       ProjectDocumentStatement[]  @relation("StatementTopic")
   optionStatements ProjectDocumentStatement[]  @relation("StatementOptionTopic")
@@ -436,6 +446,10 @@ model ProjectDocumentStatement {
   // raw model output for this statement; debugging only, not queried
   aiAnalysisOutput String? @db.Text
 
+  // human = a person edited/authored this statement (pinned); suppressed hides a human-invalidated extraction
+  origin     ProjectDataOrigin @default(ai)
+  suppressed Boolean           @default(false)
+
   // event time, from the document
   occurredAt DateTime
   // RELATIONAL bi-temporal validity (reconciler-set); null validUntil = currently valid
@@ -462,6 +476,61 @@ enum ProjectDocumentActionItemStatus {
   lapsed
 }
 
+// origin of an ai-derived row; human = a person authored or corrected it, so automated re-runs must not overwrite it
+enum ProjectDataOrigin {
+  ai
+  human
+}
+
+// where a canonical action item's current status came from; manual is human-set and pinned
+enum ProjectActionItemStatusSource {
+  extracted
+  document
+  code
+  manual
+}
+
+// canonical, deduped action item that per-document occurrences fold into; the durable row a human acts on
+model ProjectActionItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  projectId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // normalized compact label + fuller description, synthesized during canonicalization
+  title       String
+  description String  @db.Text
+  owner       String?
+  expectedBy  String?
+
+  status       ProjectDocumentActionItemStatus @default(open)
+  statusSource ProjectActionItemStatusSource   @default(extracted)
+  reason       String?                         @db.Text
+
+  // resolution provenance (reconciler- or human-set)
+  resolvedByDocumentId       String?          @db.Uuid
+  resolvedByDocument         ProjectDocument? @relation("ProjectActionItemResolvedByDocument", fields: [resolvedByDocumentId], references: [id], onDelete: SetNull)
+  resolvedByRepositoryFileId String?          @db.Uuid
+  resolvedByRepositoryFile   RepositoryFile?  @relation("ProjectActionItemResolvedByFile", fields: [resolvedByRepositoryFileId], references: [id], onDelete: SetNull)
+  // finer-grained code evidence + human stamp are plain provenance pointers (users are soft-deleted, never hard-deleted)
+  resolvedBySymbolId         String?          @db.Uuid
+  resolvedByUserId           String?
+  resolvedAt                 DateTime?
+
+  // human = pinned against automated status recompute
+  origin ProjectDataOrigin @default(ai)
+  // true when a re-fold left it with no current members (its source spans vanished); surfaced for review, not deleted
+  stale  Boolean           @default(false)
+
+  summaryEmbedding Unsupported("halfvec(3072)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documentActionItems ProjectDocumentActionItem[]
+
+  @@index([projectId, status])
+}
+
 // who owes what by when; status=lapsed is RELATIONAL (silence != lapsed)
 model ProjectDocumentActionItem {
   id                     String                @id @default(uuid()) @db.Uuid
@@ -471,6 +540,12 @@ model ProjectDocumentActionItem {
   projectDocument        ProjectDocument       @relation("ActionItemDocument", fields: [projectDocumentId], references: [id], onDelete: Cascade)
   projectDocumentTopicId String?               @db.Uuid
   projectDocumentTopic   ProjectDocumentTopic? @relation(fields: [projectDocumentTopicId], references: [id], onDelete: SetNull)
+  // canonical item this occurrence folds into (reconciler-set)
+  projectActionItemId    String?               @db.Uuid
+  projectActionItem      ProjectActionItem?    @relation(fields: [projectActionItemId], references: [id], onDelete: SetNull)
+  // origin=human survives re-extraction; suppressed hides a human-invalidated occurrence
+  origin                 ProjectDataOrigin     @default(ai)
+  suppressed             Boolean               @default(false)
 
   owner                String
   description          String                          @db.Text
@@ -491,6 +566,7 @@ model ProjectDocumentActionItem {
   updatedAt            DateTime                        @updatedAt
 
   @@index([projectDocumentId])
+  @@index([projectActionItemId])
   @@index([projectId, status])
 }
 
@@ -520,6 +596,9 @@ model ProjectDocumentReference {
   resolvedToDocument    ProjectDocument?                   @relation("ReferenceResolvedToDocument", fields: [resolvedToDocumentId], references: [id], onDelete: SetNull)
   resolvedToStatementId String?                            @db.Uuid
   resolvedToStatement   ProjectDocumentStatement?          @relation("ReferenceResolvedToStatement", fields: [resolvedToStatementId], references: [id], onDelete: SetNull)
+  // human = a person set the resolution/target (pinned against re-resolution); suppressed hides it
+  origin                ProjectDataOrigin                  @default(ai)
+  suppressed            Boolean                            @default(false)
   // verbatim span from the document (evidence)
   textRaw               String                             @db.Text
   createdAt             DateTime                           @default(now())
@@ -527,6 +606,49 @@ model ProjectDocumentReference {
 
   @@index([fromProjectDocumentId])
   @@index([projectId, resolution])
+}
+
+enum ProjectCorrectionEntity {
+  statement
+  reference
+}
+
+enum ProjectCorrectionOperation {
+  edit
+  invalidate
+  add
+}
+
+enum ProjectCorrectionStatus {
+  active
+  orphaned
+}
+
+// durable human corrections to per-document entities (statements, references) that have no canonical home; re-applied
+// after every extraction by re-binding to the current ai row via a stable anchor, so a correction survives re-extraction
+model ProjectDocumentCorrection {
+  id                String           @id @default(uuid()) @db.Uuid
+  projectId         String           @db.Uuid
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // scope for the anchor; null for a project-wide add
+  projectDocumentId String?          @db.Uuid
+  projectDocument   ProjectDocument? @relation(fields: [projectDocumentId], references: [id], onDelete: Cascade)
+
+  entity            ProjectCorrectionEntity
+  operation         ProjectCorrectionOperation
+  // stable identity used to re-bind to the regenerated ai row (statement.textRaw / reference.referentText)
+  anchorText        String?                       @db.Text
+  anchorEmbedding   Unsupported("halfvec(3072)")?
+  // corrected fields (partial), or the full body for an `add`
+  patch             Json
+  status            ProjectCorrectionStatus       @default(active)
+  note              String?                       @db.Text
+  correctedByUserId String
+  createdAt         DateTime                      @default(now())
+  updatedAt         DateTime                      @updatedAt
+
+  @@index([projectId, entity])
+  @@index([projectDocumentId])
 }
 
 enum DecisionRecordType {
