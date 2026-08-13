@@ -128,6 +128,17 @@ export class GoogleDriveService {
     }
   }
 
+  getServiceAccountEmail(): string {
+    const serviceAccountKey = this.envService.get("GOOGLE_SERVICE_ACCOUNT_KEY_BASE64");
+    if (!serviceAccountKey) {
+      throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY_BASE64 is not configured");
+    }
+    const credentials = JSON.parse(
+      Buffer.from(serviceAccountKey, "base64").toString("utf-8"),
+    ) as GoogleServiceAccountCredentials;
+    return credentials.client_email;
+  }
+
   // builds a read-only drive client authenticated as the global service account
   _getDriveClient(): drive_v3.Drive {
     const serviceAccountKey = this.envService.get("GOOGLE_SERVICE_ACCOUNT_KEY_BASE64");

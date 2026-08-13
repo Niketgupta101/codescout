@@ -62,6 +62,43 @@ export class ProjectDocumentService {
     }
   }
 
+  async createManual({
+    projectId,
+    projectFolderId,
+    name,
+    content,
+    occurredAt,
+  }: {
+    projectId: string;
+    projectFolderId?: string;
+    name: string;
+    content: string;
+    occurredAt?: Date;
+  }) {
+    const markdown = stripNullBytes(content);
+    const checksum = createHash("sha256").update(markdown).digest("hex");
+
+    const projectDocument = await this.prisma.projectDocument.create({
+      data: {
+        projectId,
+        projectFolderId,
+        provider: "manual",
+        name,
+        path: name,
+        contentType: "text/markdown",
+        contentRaw: markdown,
+        occurredAt: occurredAt ?? new Date(),
+        checksum,
+      },
+    });
+
+    await this.indexingService.projectDocumentIndex(projectDocument.id);
+    await this.indexingService.projectDocumentClassify(projectDocument.id);
+    await this.indexingService.projectDocumentExtract(projectDocument.id);
+
+    return projectDocument;
+  }
+
   async importProjectDocument(projectDocument: ProjectDocument) {
     // google drive is the only source supported
     if (projectDocument.provider === "googleDrive") {

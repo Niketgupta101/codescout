@@ -6,11 +6,20 @@ import { ProjectDocumentModule } from "../project-document/project-document.modu
 import { MarkitdownModule } from "../markitdown/markitdown.module";
 import { GoogleDriveModule } from "../google-drive/google-drive.module";
 import { ProjectReconcileModule } from "../project-reconcile/project-reconcile.module";
+import { McpModule as RekogMcpModule } from "@rekog/mcp-nest";
+import { ProjectFolderMcp } from "./project-folders.mcp";
 
 @Module({
-  imports: [PrismaModule, ProjectDocumentModule, MarkitdownModule, GoogleDriveModule, ProjectReconcileModule],
+  imports: [
+    PrismaModule,
+    ProjectDocumentModule,
+    MarkitdownModule,
+    GoogleDriveModule,
+    ProjectReconcileModule,
+    RekogMcpModule.forFeature([ProjectFolderMcp], "codescout"),
+  ],
   controllers: [ProjectFoldersController],
-  providers: [ProjectFolderService],
+  providers: [ProjectFolderService, ProjectFolderMcp],
   exports: [ProjectFolderService],
 })
 export class ProjectFoldersModule {}
