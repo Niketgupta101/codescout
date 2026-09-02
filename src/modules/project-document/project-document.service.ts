@@ -69,9 +69,7 @@ export class ProjectDocumentService {
         },
       });
 
-      await this.indexingService.projectDocumentIndex(projectDocument.id);
-      await this.indexingService.projectDocumentClassify(projectDocument.id);
-      await this.indexingService.projectDocumentExtract(projectDocument.id);
+      await this.indexingService.projectDocumentProcess(projectDocument.id);
 
       return projectDocument;
     } else {
@@ -118,9 +116,7 @@ export class ProjectDocumentService {
       },
     });
 
-    await this.indexingService.projectDocumentIndex(projectDocument.id);
-    await this.indexingService.projectDocumentClassify(projectDocument.id);
-    await this.indexingService.projectDocumentExtract(projectDocument.id);
+    await this.indexingService.projectDocumentProcess(projectDocument.id);
 
     return projectDocument;
   }
@@ -206,9 +202,7 @@ export class ProjectDocumentService {
       throw error;
     }
 
-    await this.indexingService.projectDocumentIndex(updated.id);
-    await this.indexingService.projectDocumentClassify(updated.id);
-    await this.indexingService.projectDocumentExtract(updated.id);
+    await this.indexingService.projectDocumentProcess(updated.id);
 
     return updated;
   }
