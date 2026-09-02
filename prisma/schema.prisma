@@ -235,7 +235,7 @@ model ProjectDocument {
 
   name                       String
   provider                   ProjectDocumentProvider
-  providerExternalId         String?
+  providerExternalIds        String[]
   providerExternalModifiedAt DateTime?
   // inferred genre; other = generic-lens catch-all so a novel genre routes instead of mis-filing
   type                       ProjectDocumentType           @default(other)
@@ -274,9 +274,9 @@ model ProjectDocument {
   @@index([projectId, type])
   @@index([projectId, occurredAt])
   @@index([projectFolderId])
-  @@index([providerExternalId])
+  @@index([providerExternalIds], type: Gin)
   @@index([artifactKey])
-  @@index([checksum])
+  @@index([projectId, checksum])
 }
 
 model Conversation {

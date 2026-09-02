@@ -143,4 +143,11 @@ export class EnvConfig {
 
   @IsString()
   APP_PUBLIC_URL: string;
+
+  // polls every linked drive folder on a schedule and imports what changed; off by default so a local or preview
+  // instance never spends drive quota and inference tokens against a shared project
+  @Transform(transformBooleanString())
+  @IsOptional()
+  @IsBoolean()
+  PROJECT_FOLDER_SYNC_ENABLED?: boolean;
 }

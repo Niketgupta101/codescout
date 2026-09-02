@@ -1,7 +1,9 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { Cron, CronExpression } from "@nestjs/schedule";
+import { DocumentStatus, Prisma } from "@prisma/client";
 import type { ProjectFolder } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { EnvService } from "../env/env.service";
 import { LocaleException } from "src/plugins/locale/nest/locale.exception";
 import { ProjectDocumentService } from "../project-document/project-document.service";
 import { MarkitdownService } from "../markitdown/markitdown.service";
@@ -16,12 +18,16 @@ import type { ProjectFolderImportIssue } from "./types/project-folder-import-iss
 export class ProjectFolderService {
   readonly logger = new Logger(ProjectFolderService.name);
 
+  // guards the scheduled sweep against overlapping itself; see _handleProjectFolderSync
+  isSyncing = false;
+
   constructor(
     readonly prisma: PrismaService,
     readonly projectDocumentService: ProjectDocumentService,
     readonly markitdownService: MarkitdownService,
     readonly googleDriveService: GoogleDriveService,
     readonly projectReconcileService: ProjectReconcileService,
+    readonly envService: EnvService,
   ) {}
 
   async create(createInput: { projectId: string; createProjectFolderDto: CreateProjectFolderDto }) {
@@ -73,22 +79,19 @@ export class ProjectFolderService {
     return projectFolder;
   }
 
-  async importProjectFolder(projectFolderId: string, force = false): Promise<ProjectFolderImportResult> {
+  async importProjectFolder(projectFolderId: string): Promise<ProjectFolderImportResult> {
     const projectFolder = await this.findOne(projectFolderId);
 
     // google drive is the only source supported
     if (projectFolder.provider === "googleDrive") {
-      return this._googleDriveProjectFolderImport(projectFolder, force);
+      return this._googleDriveProjectFolderImport(projectFolder);
     } else {
       throw new Error(`Unsupported project folder provider: ${projectFolder.provider as string}`);
     }
   }
 
   // crawls a linked google drive folder, routing each supported file to create or re-import
-  async _googleDriveProjectFolderImport(
-    projectFolder: ProjectFolder,
-    force: boolean,
-  ): Promise<ProjectFolderImportResult> {
+  async _googleDriveProjectFolderImport(projectFolder: ProjectFolder): Promise<ProjectFolderImportResult> {
     const files = await this.googleDriveService.listFolderFiles({ folderId: projectFolder.providerId });
 
     this.logger.log(`Importing ${files.length} drive files for project ${projectFolder.projectId}`);
@@ -109,18 +112,32 @@ export class ProjectFolderService {
 
       const heartbeat = `[${index + 1}/${files.length}] ${file.path}`;
 
+      // matched project-wide rather than per folder, so a file that moved between folders is recognized as the
+      // document it already is. aliases match too, so a duplicate upload resolves to the document holding its content
       const projectDocument = await this.prisma.projectDocument.findFirst({
-        where: { projectId: projectFolder.projectId, providerExternalId: file.id },
+        where: { projectId: projectFolder.projectId, providerExternalIds: { has: file.id } },
       });
 
       if (projectDocument) {
-        // skip re-import if unchanged since last import, unless a forced re-import was requested
+        // a moved or renamed file keeps its drive id, so follow it here instead of importing a second copy
+        if (projectDocument.projectFolderId !== projectFolder.id || projectDocument.path !== file.path) {
+          this.logger.log(`${heartbeat} moved, reattaching to this folder`);
+
+          await this.prisma.projectDocument.update({
+            where: { id: projectDocument.id },
+            data: { projectFolderId: projectFolder.id, path: file.path },
+          });
+        }
+
+        // skip re-import when the file has not changed since the last successful one; a document left pending or
+        // failed is retried, which is what makes a forced re-import unnecessary
         const isUnchanged =
+          projectDocument.status === DocumentStatus.completed &&
           !!projectDocument.providerExternalModifiedAt &&
           !!file.modifiedAt &&
           projectDocument.providerExternalModifiedAt.getTime() >= file.modifiedAt.getTime();
 
-        if (isUnchanged && !force) {
+        if (isUnchanged) {
           this.logger.log(`${heartbeat} unchanged, skipping`);
           continue;
         }
@@ -175,6 +192,50 @@ export class ProjectFolderService {
       `Project folder import completed with ${documentsChanged} changed document(s) for project ${projectFolder.projectId}`,
     );
 
-    return { projectFolderId: projectFolder.id, issues };
+    return { projectFolderId: projectFolder.id, documentsChanged, issues };
+  }
+
+  /**
+   * Polls every linked folder and imports what changed since its last sync.
+   * A folder whose files are untouched costs one drive listing and no inference, so the schedule stays cheap.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async _handleProjectFolderSync() {
+    if (!this.envService.get("PROJECT_FOLDER_SYNC_ENABLED", false)) {
+      return;
+    }
+
+    // an import of a folder with many new documents can outrun the interval, so let the run in flight finish
+    // rather than starting a second pass over the same folders
+    if (this.isSyncing) {
+      this.logger.warn("Skipping scheduled folder sync, the previous run is still in progress");
+
+      return;
+    }
+
+    this.isSyncing = true;
+
+    try {
+      const projectFolders = await this.prisma.projectFolder.findMany({ orderBy: { lastSyncedAt: "asc" } });
+
+      this.logger.log(`Scheduled sync starting for ${projectFolders.length} folder(s)`);
+
+      let documentsChanged = 0;
+
+      // sequential so one sweep cannot fan out into concurrent drive downloads and extraction across every project
+      for (const projectFolder of projectFolders) {
+        try {
+          const result = await this.importProjectFolder(projectFolder.id);
+          documentsChanged += result.documentsChanged;
+        } catch (error) {
+          // one unreachable or unshared folder must not stop the folders behind it in the sweep
+          this.logger.error(`Scheduled sync failed for folder ${projectFolder.id}`, error);
+        }
+      }
+
+      this.logger.log(`Scheduled sync complete, ${documentsChanged} document(s) changed`);
+    } finally {
+      this.isSyncing = false;
+    }
   }
 }

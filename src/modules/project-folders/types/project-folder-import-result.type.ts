@@ -3,5 +3,6 @@ import type { ProjectFolderImportIssue } from "./project-folder-import-issue.typ
 // outcome of importing one folder: only files that could not be ingested are reported
 export type ProjectFolderImportResult = {
   projectFolderId: string;
+  documentsChanged: number;
   issues: ProjectFolderImportIssue[];
 };
