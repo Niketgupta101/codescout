@@ -6,6 +6,8 @@ import { ProjectFolderImportIssueEntity } from "./project-folder-import-issue.en
 export class ProjectFolderImportResultEntity {
   projectFolderId: string;
 
+  documentsChanged: number;
+
   @NestedArray(() => ProjectFolderImportIssueEntity)
   issues: ProjectFolderImportIssueEntity[];
 }

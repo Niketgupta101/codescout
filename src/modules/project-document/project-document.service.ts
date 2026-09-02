@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { createHash } from "crypto";
+import { DocumentStatus } from "@prisma/client";
 import type { ProjectDocument } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { GoogleDriveService } from "../google-drive/google-drive.service";
@@ -36,12 +37,28 @@ export class ProjectDocumentService {
       // provisional; classify infers the real event date from the content
       const occurredAt = file.modifiedAt ?? new Date();
 
+      // a copy or re-upload arrives as a new drive file carrying content the project has already extracted; alias it
+      // onto that document rather than paying extraction again and splitting the knowledge across two documents
+      const duplicate = await this._projectDocumentFindByChecksum({ projectId, checksum });
+
+      if (duplicate) {
+        this.logger.log(`Drive file ${file.path} duplicates document ${duplicate.path}, aliasing instead of indexing`);
+
+        return this.prisma.projectDocument.update({
+          where: { id: duplicate.id },
+          data: {
+            providerExternalIds: { push: providerExternalId },
+            projectFolderId: duplicate.projectFolderId ?? projectFolderId,
+          },
+        });
+      }
+
       const projectDocument = await this.prisma.projectDocument.create({
         data: {
           projectId,
           projectFolderId,
           provider,
-          providerExternalId,
+          providerExternalIds: [providerExternalId],
           name: file.name,
           path: file.path,
           contentType: downloadedFile.contentType,
@@ -78,6 +95,15 @@ export class ProjectDocumentService {
     const markdown = stripNullBytes(content);
     const checksum = createHash("sha256").update(markdown).digest("hex");
 
+    // the same synthesized content submitted twice is one document, not two competing sets of statements
+    const duplicate = await this._projectDocumentFindByChecksum({ projectId, checksum });
+
+    if (duplicate) {
+      this.logger.log(`Manual document ${name} duplicates document ${duplicate.path}, returning the existing document`);
+
+      return duplicate;
+    }
+
     const projectDocument = await this.prisma.projectDocument.create({
       data: {
         projectId,
@@ -99,6 +125,15 @@ export class ProjectDocumentService {
     return projectDocument;
   }
 
+  // content identity within a project: two documents are the same document when their converted markdown is identical.
+  // the oldest match wins so the document that owns the extraction stays stable across repeated uploads
+  async _projectDocumentFindByChecksum({ projectId, checksum }: { projectId: string; checksum: string }) {
+    return this.prisma.projectDocument.findFirst({
+      where: { projectId, checksum },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
   async importProjectDocument(projectDocument: ProjectDocument) {
     // google drive is the only source supported
     if (projectDocument.provider === "googleDrive") {
@@ -110,14 +145,17 @@ export class ProjectDocumentService {
 
   // re-fetches a drive document from its stored coordinates, replaces its content and re-indexes
   async _googleDriveProjectDocumentImport(projectDocument: ProjectDocument) {
-    if (!projectDocument.providerExternalId) {
-      throw new Error("google drive document is missing providerExternalId");
+    // the first id is the file this document was created from; later ids are duplicates that alias onto it
+    const [providerExternalId] = projectDocument.providerExternalIds;
+
+    if (!providerExternalId) {
+      throw new Error("google drive document is missing providerExternalIds");
     }
 
     let updated: ProjectDocument;
 
     try {
-      const file = await this.googleDriveService.getFile({ fileId: projectDocument.providerExternalId });
+      const file = await this.googleDriveService.getFile({ fileId: providerExternalId });
       const downloadedFile = await this.googleDriveService.downloadFile({ file });
       const { markdown: rawMarkdown } = await this.markitdownService.convert(downloadedFile);
       // strip null bytes at the ingestion boundary so postgres text columns accept the content
@@ -126,6 +164,24 @@ export class ProjectDocumentService {
       const checksum = createHash("sha256").update(markdown).digest("hex");
       // provisional; classify infers the real event date from the content
       const occurredAt = file.modifiedAt ?? new Date();
+
+      // a move, a rename, or an edit that touched only drive metadata leaves the converted content byte-identical.
+      // re-extracting it would delete and recreate every statement of this document under new ids, orphaning the
+      // canonical links and reference resolutions built on them - so refresh the provider metadata and stop.
+      // occurredAt is deliberately left alone here because classify inferred it from this same content
+      if (checksum === projectDocument.checksum && projectDocument.status === DocumentStatus.completed) {
+        this.logger.log(`Content unchanged for ${file.path}, keeping the existing extraction`);
+
+        return await this.prisma.projectDocument.update({
+          where: { id: projectDocument.id },
+          data: {
+            name: file.name,
+            path: file.path,
+            contentType: downloadedFile.contentType,
+            providerExternalModifiedAt: file.modifiedAt,
+          },
+        });
+      }
 
       updated = await this.prisma.projectDocument.update({
         where: { id: projectDocument.id },

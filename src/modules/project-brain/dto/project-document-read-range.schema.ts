@@ -27,10 +27,10 @@ export const ProjectDocumentReadRangeSchema = z
       .optional()
       .describe("Last line to include (1-indexed, inclusive). Range size is capped at 1500 lines per call."),
   })
-  .refine((input) => input.documentId || input.statementId, {
+  .refine((input) => input.documentId ?? input.statementId, {
     message: "documentId or statementId is required",
   })
-  .refine((input) => input.statementId || (input.startLine && input.endLine), {
+  .refine((input) => input.statementId ?? (input.startLine && input.endLine), {
     message: "startLine and endLine are required unless statementId is provided",
   });
 

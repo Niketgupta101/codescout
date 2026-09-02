@@ -22,6 +22,16 @@ import type { ActionItemResolutionEvidence } from "./types/action-item-resolutio
 // raised from 0.6 after a seed inspection showed the judge over-linking relatedness/strategy as supersession (F16)
 const SUPERSESSION_CONFIDENCE_THRESHOLD = 0.75;
 const SUPERSESSION_CANDIDATE_LIMIT = 5;
+const SUPERSESSION_DISTANCE_THRESHOLD = 0.35;
+const SUPERSESSION_BATCH_SIZE = 10;
+
+type CandidateSupersessionEdge = {
+  sourceId: string;
+  targetId: string;
+  confidence: number;
+  distance: number;
+  weight: number;
+};
 
 // resolution (references + action-item status) mirrors the supersession pattern: nearest candidates then an llm judgment
 const RESOLUTION_CONFIDENCE_THRESHOLD = 0.6;
@@ -75,148 +85,20 @@ export class ProjectReconcileService {
     return this._resolveCanonicalActionItemStatus(projectId);
   }
 
+  async threadStatements(projectId: string): Promise<{ statementsReconciled: number; supersessionsLinked: number }> {
+    this.logger.log(`Threading statements for project ${projectId}`);
+
+    return this._threadStatements(projectId);
+  }
+
   async reconcile(projectId: string): Promise<ProjectReconcileResult> {
     const startedAt = Date.now();
-    const concurrency = this.openaiService.configService.get<number>("RECONCILE_CONCURRENCY", 1);
     this.logger.log(`Reconciling project ${projectId}`);
 
     const { correctionsApplied, topicsCreated, topicsMatched, actionItemsCreated, actionItemsMatched } =
       await this.canonicalize(projectId);
 
-    const statements = await this.prisma.projectDocumentStatement.findMany({
-      where: { projectId, suppressed: false },
-      orderBy: { occurredAt: "asc" },
-    });
-
-    this.logger.log(`Threading ${statements.length} statements`);
-
-    // start every statement from its local (extraction-time) state - validFrom set, nothing superseded
-    const desiredStates = new Map<string, ProjectReconcileStatementState>();
-
-    for (const statement of statements) {
-      // a human-edited statement keeps its human-set state; otherwise restore the extraction-time state
-      const local =
-        statement.origin === ProjectDataOrigin.human
-          ? { decisionStatus: statement.decisionStatus, implementationStatus: statement.implementationStatus }
-          : this._localStatuses(statement);
-      desiredStates.set(statement.id, {
-        validFrom: statement.occurredAt,
-        validUntil: null,
-        decisionStatus: local.decisionStatus,
-        implementationStatus: local.implementationStatus,
-        replacesPriorStatementId: null,
-        replacedByStatementId: null,
-      });
-    }
-
-    let supersessionsLinked = 0;
-
-    // Embed all local replacement hints in one request, then judge each statement's full candidate set in one call.
-    const hintStatements = statements.filter((statement) => Boolean(statement.replacesPriorStatementText));
-    const { embeddings: hintEmbeddings } = await this.openaiService.generateEmbeddings(
-      hintStatements.map((statement) => statement.replacesPriorStatementText!),
-    );
-    const hintResults = await this._mapWithConcurrency(hintStatements, concurrency, (statement, index) =>
-      this._findSupersededStatement({ projectId, statement, embedding: hintEmbeddings[index] }),
-    );
-
-    // thread each hint-carrying statement onto the prior statement it replaces
-    for (let index = 0; index < hintStatements.length; index++) {
-      const statement = hintStatements[index];
-      const prior = hintResults[index];
-
-      if (!prior) {
-        continue;
-      }
-
-      const newState = desiredStates.get(statement.id);
-      const priorState = desiredStates.get(prior.id);
-
-      if (!newState || !priorState) {
-        continue;
-      }
-
-      newState.replacesPriorStatementId = prior.id;
-      priorState.replacedByStatementId = statement.id;
-      priorState.decisionStatus = ProjectDocumentDecisionStatus.superseded;
-      priorState.validUntil = statement.occurredAt;
-      supersessionsLinked++;
-    }
-
-    // cross-document current-state: extraction only sets replacesPriorStatementText within a single document, so a
-    // proposal/decision overturned by a LATER document (e.g. a proposal made in one meeting, rejected in the next) is
-    // missed by the hint pass above. for each still-live proposal/decision, look forward for a statement that reverses it.
-    const overturningSources = statements.filter((statement) => {
-      const state = desiredStates.get(statement.id);
-
-      const isProposalOrDecision =
-        statement.type === ProjectDocumentStatementType.proposal ||
-        statement.type === ProjectDocumentStatementType.decision;
-
-      // skip non-proposals, and any already threaded by the hint pass (superseded, or a superseder of a prior)
-      return !(
-        !state ||
-        !isProposalOrDecision ||
-        state.decisionStatus === ProjectDocumentDecisionStatus.superseded ||
-        Boolean(state.replacedByStatementId) ||
-        Boolean(state.replacesPriorStatementId)
-      );
-    });
-    const overturningResults = await this._mapWithConcurrency(overturningSources, concurrency, (statement) =>
-      this._findOverturningStatement({ projectId, statement }),
-    );
-
-    for (let index = 0; index < overturningSources.length; index++) {
-      const statement = overturningSources[index];
-      const overturner = overturningResults[index];
-      const state = desiredStates.get(statement.id);
-
-      if (!overturner || !state) {
-        continue;
-      }
-
-      const overturnerState = desiredStates.get(overturner.id);
-
-      if (!overturnerState) {
-        continue;
-      }
-
-      state.replacedByStatementId = overturner.id;
-      state.decisionStatus = ProjectDocumentDecisionStatus.superseded;
-      state.validUntil = overturner.occurredAt;
-
-      // reciprocal link only if the overturner is not already threaded onto an earlier statement
-      overturnerState.replacesPriorStatementId ??= statement.id;
-
-      supersessionsLinked++;
-    }
-
-    // virtual reset: apply the fully-computed state in one atomic transaction (no destructive pre-wipe)
-    const updates: Prisma.PrismaPromise<ProjectDocumentStatement>[] = [];
-
-    for (const statement of statements) {
-      const state = desiredStates.get(statement.id);
-
-      if (!state) {
-        continue;
-      }
-
-      updates.push(
-        this.prisma.projectDocumentStatement.update({
-          where: { id: statement.id },
-          data: {
-            validFrom: state.validFrom,
-            validUntil: state.validUntil,
-            decisionStatus: state.decisionStatus,
-            implementationStatus: state.implementationStatus,
-            replacesPriorStatementId: state.replacesPriorStatementId,
-            replacedByStatementId: state.replacedByStatementId,
-          },
-        }),
-      );
-    }
-
-    await this.prisma.$transaction(updates);
+    const { statementsReconciled, supersessionsLinked } = await this._threadStatements(projectId);
 
     // materialize reference links now that the statement/topic graph is stable
     const { referencesResolved } = await this._resolveReferences(projectId);
@@ -233,7 +115,7 @@ export class ProjectReconcileService {
       correctionsApplied,
       topicsCreated,
       topicsMatched,
-      statementsReconciled: statements.length,
+      statementsReconciled,
       supersessionsLinked,
       actionItemsCreated,
       actionItemsMatched,
@@ -942,108 +824,282 @@ export class ProjectReconcileService {
     }
   }
 
-  // finds the prior statement a hint-carrying statement supersedes, via embedding candidates + an llm judgment
-  async _findSupersededStatement({
-    projectId,
-    statement,
-    embedding,
-  }: {
-    projectId: string;
-    statement: ProjectDocumentStatement;
-    embedding: number[];
-  }): Promise<ProjectDocumentStatement | null> {
-    if (!statement.replacesPriorStatementText) {
-      return null;
+  _resolveSupersessionGraph(edges: CandidateSupersessionEdge[]): { sourceId: string; targetId: string }[] {
+    const validEdges = edges
+      .filter((edge) => edge.confidence >= SUPERSESSION_CONFIDENCE_THRESHOLD)
+      .sort((a, b) => b.weight - a.weight);
+
+    const usedSources = new Set<string>();
+    const usedTargets = new Set<string>();
+    const selectedEdges: { sourceId: string; targetId: string }[] = [];
+    const forwardMap = new Map<string, string>();
+
+    for (const edge of validEdges) {
+      if (usedSources.has(edge.sourceId) || usedTargets.has(edge.targetId)) {
+        continue;
+      }
+
+      // cycle check: trace forward from edge.targetId to ensure we never reach edge.sourceId
+      let current: string | undefined = edge.targetId;
+      let hasCycle = false;
+      while (current) {
+        if (current === edge.sourceId) {
+          hasCycle = true;
+          break;
+        }
+        current = forwardMap.get(current);
+      }
+
+      if (hasCycle) {
+        continue;
+      }
+
+      usedSources.add(edge.sourceId);
+      usedTargets.add(edge.targetId);
+      forwardMap.set(edge.sourceId, edge.targetId);
+      selectedEdges.push({ sourceId: edge.sourceId, targetId: edge.targetId });
     }
 
-    // nearest earlier statements in the same project, ranked by the prior-decision hint
-    const candidates = await this.prisma.$queryRaw<{ id: string; textDerived: string }[]>`
-      SELECT id, "textDerived"
-      FROM "ProjectDocumentStatement"
-      WHERE "projectId" = ${projectId}::uuid
-        AND "occurredAt" < ${statement.occurredAt}
-        AND id != ${statement.id}::uuid
-        AND "textDerivedEmbedding" IS NOT NULL
-        AND "suppressed" = false
-      ORDER BY "textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec
-      LIMIT ${SUPERSESSION_CANDIDATE_LIMIT}
-    `;
-
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    const judgment = await this.openaiService.generateStatementSupersessionJudgment({
-      statement: statement.textDerived,
-      candidates: candidates.map((candidate) => ({ id: candidate.id, text: candidate.textDerived })),
-      candidateRole: "prior",
-      hint: statement.replacesPriorStatementText,
-    });
-
-    return judgment.candidateId && judgment.confidence >= SUPERSESSION_CONFIDENCE_THRESHOLD
-      ? this.prisma.projectDocumentStatement.findUnique({ where: { id: judgment.candidateId } })
-      : null;
+    return selectedEdges;
   }
 
-  // finds a LATER statement that reverses a still-live proposal/decision, without an extraction hint (cross-document)
-  async _findOverturningStatement({
-    projectId,
-    statement,
-  }: {
-    projectId: string;
-    statement: ProjectDocumentStatement;
-  }): Promise<ProjectDocumentStatement | null> {
-    // without a date we cannot order candidates temporally, so there is nothing to look forward to
-    if (!statement.occurredAt) {
-      return null;
+  async _threadStatements(
+    projectId: string,
+  ): Promise<{ statementsReconciled: number; supersessionsLinked: number }> {
+    const startedAt = Date.now();
+    const statements = await this.prisma.projectDocumentStatement.findMany({
+      where: { projectId, suppressed: false },
+      orderBy: { occurredAt: "asc" },
+    });
+
+    if (statements.length === 0) {
+      return { statementsReconciled: 0, supersessionsLinked: 0 };
     }
 
-    // Reuse the source statement's stored embedding instead of calling the embedding API again.
-    const candidates = await this.prisma.$queryRaw<
-      {
-        id: string;
-        textDerived: string;
-        type: ProjectDocumentStatementType;
-        decisionStatus: ProjectDocumentDecisionStatus | null;
-      }[]
-    >`
-      SELECT candidate.id, candidate."textDerived", candidate.type, candidate."decisionStatus"
-      FROM "ProjectDocumentStatement" candidate
-      JOIN "ProjectDocumentStatement" source ON source.id = ${statement.id}::uuid
-      WHERE candidate."projectId" = ${projectId}::uuid
-        AND candidate."occurredAt" > ${statement.occurredAt}
-        AND candidate.id != ${statement.id}::uuid
-        AND candidate."textDerivedEmbedding" IS NOT NULL
-        AND source."textDerivedEmbedding" IS NOT NULL
-        AND candidate."suppressed" = false
-      ORDER BY candidate."textDerivedEmbedding" <=> source."textDerivedEmbedding"
-      LIMIT ${SUPERSESSION_CANDIDATE_LIMIT}
-    `;
+    this.logger.log(`Threading ${statements.length} statements for project ${projectId}`);
 
-    const committedCandidates = candidates.filter((later) => {
-      // a committed reversal is a decision or an accepted proposal; an open proposal or question does not overturn a
-      // prior choice (F16: a broad "focus on look and feel" open proposal was superseding six specific proposals)
-      return (
-        later.type === ProjectDocumentStatementType.decision ||
-        later.decisionStatus === ProjectDocumentDecisionStatus.accepted
+    const statementById = new Map<string, ProjectDocumentStatement>();
+    const desiredStates = new Map<string, ProjectReconcileStatementState>();
+
+    for (const statement of statements) {
+      statementById.set(statement.id, statement);
+      const local =
+        statement.origin === ProjectDataOrigin.human
+          ? { decisionStatus: statement.decisionStatus, implementationStatus: statement.implementationStatus }
+          : this._localStatuses(statement);
+      desiredStates.set(statement.id, {
+        validFrom: statement.occurredAt,
+        validUntil: null,
+        decisionStatus: local.decisionStatus,
+        implementationStatus: local.implementationStatus,
+        replacesPriorStatementId: null,
+        replacedByStatementId: null,
+      });
+    }
+
+    const candidateEdges: CandidateSupersessionEdge[] = [];
+
+    // PASS 1: Hint-carrying statements
+    const hintStatements = statements.filter(
+      (statement) => Boolean(statement.replacesPriorStatementText) && Boolean(statement.occurredAt),
+    );
+
+    if (hintStatements.length > 0) {
+      const { embeddings: hintEmbeddings } = await this.openaiService.generateEmbeddings(
+        hintStatements.map((statement) => statement.replacesPriorStatementText!),
       );
-    });
 
-    if (committedCandidates.length === 0) {
-      return null;
+      const hintItemsForLlm: {
+        statement: ProjectDocumentStatement;
+        candidates: { id: string; text: string; distance: number }[];
+      }[] = [];
+
+      for (let index = 0; index < hintStatements.length; index++) {
+        const statement = hintStatements[index];
+        const embedding = hintEmbeddings[index];
+
+        const rows = await this.prisma.$queryRaw<{ id: string; textDerived: string; distance: number }[]>`
+          SELECT id, "textDerived", ("textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) AS distance
+          FROM "ProjectDocumentStatement"
+          WHERE "projectId" = ${projectId}::uuid
+            AND "occurredAt" < ${statement.occurredAt}
+            AND id != ${statement.id}::uuid
+            AND "textDerivedEmbedding" IS NOT NULL
+            AND "suppressed" = false
+            AND ("textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) <= ${SUPERSESSION_DISTANCE_THRESHOLD}
+          ORDER BY distance ASC
+          LIMIT ${SUPERSESSION_CANDIDATE_LIMIT}
+        `;
+
+        if (rows.length > 0) {
+          hintItemsForLlm.push({
+            statement,
+            candidates: rows.map((row) => ({ id: row.id, text: row.textDerived, distance: row.distance })),
+          });
+        }
+      }
+
+      for (let index = 0; index < hintItemsForLlm.length; index += SUPERSESSION_BATCH_SIZE) {
+        const batch = hintItemsForLlm.slice(index, index + SUPERSESSION_BATCH_SIZE);
+        const { decisions } = await this.openaiService.generateStatementBatchSupersessionJudgments({
+          items: batch.map((item) => ({
+            statement: item.statement.textDerived,
+            candidateRole: "prior",
+            hint: item.statement.replacesPriorStatementText,
+            candidates: item.candidates.map((candidate) => ({ id: candidate.id, text: candidate.text })),
+          })),
+        });
+
+        for (let batchIndex = 0; batchIndex < batch.length; batchIndex++) {
+          const decision = decisions[batchIndex];
+          if (decision?.candidateId && decision.confidence >= SUPERSESSION_CONFIDENCE_THRESHOLD) {
+            const matchedCandidate = batch[batchIndex].candidates.find((candidate) => candidate.id === decision.candidateId);
+            const distance = matchedCandidate ? matchedCandidate.distance : 0;
+            candidateEdges.push({
+              sourceId: decision.candidateId,
+              targetId: batch[batchIndex].statement.id,
+              confidence: decision.confidence,
+              distance,
+              weight: decision.confidence * (1 - distance),
+            });
+          }
+        }
+      }
     }
 
-    const judgment = await this.openaiService.generateStatementSupersessionJudgment({
-      statement: statement.textDerived,
-      candidates: committedCandidates.map((candidate) => ({ id: candidate.id, text: candidate.textDerived })),
-      candidateRole: "new",
+    // PASS 2: Cross-document live proposals/decisions
+    const liveProposalsAndDecisions = statements.filter((statement) => {
+      const isProposalOrDecision =
+        statement.type === ProjectDocumentStatementType.proposal ||
+        statement.type === ProjectDocumentStatementType.decision;
+      return isProposalOrDecision && Boolean(statement.occurredAt);
     });
 
-    if (!judgment.candidateId || judgment.confidence < SUPERSESSION_CONFIDENCE_THRESHOLD) {
-      return null;
+    if (liveProposalsAndDecisions.length > 0) {
+      const crossDocItemsForLlm: {
+        statement: ProjectDocumentStatement;
+        candidates: { id: string; text: string; distance: number }[];
+      }[] = [];
+
+      for (const statement of liveProposalsAndDecisions) {
+        const rows = await this.prisma.$queryRaw<
+          {
+            id: string;
+            textDerived: string;
+            type: ProjectDocumentStatementType;
+            decisionStatus: ProjectDocumentDecisionStatus | null;
+            distance: number;
+          }[]
+        >`
+          SELECT candidate.id, candidate."textDerived", candidate.type, candidate."decisionStatus",
+                 (candidate."textDerivedEmbedding" <=> source."textDerivedEmbedding") AS distance
+          FROM "ProjectDocumentStatement" candidate
+          JOIN "ProjectDocumentStatement" source ON source.id = ${statement.id}::uuid
+          WHERE candidate."projectId" = ${projectId}::uuid
+            AND candidate."occurredAt" > ${statement.occurredAt}
+            AND candidate.id != ${statement.id}::uuid
+            AND candidate."textDerivedEmbedding" IS NOT NULL
+            AND source."textDerivedEmbedding" IS NOT NULL
+            AND candidate."suppressed" = false
+            AND (
+              candidate.type = 'decision'::"ProjectDocumentStatementType" OR
+              candidate.type = 'proposal'::"ProjectDocumentStatementType" OR
+              candidate."decisionStatus" = 'accepted'::"ProjectDocumentDecisionStatus"
+            )
+            AND (candidate."textDerivedEmbedding" <=> source."textDerivedEmbedding") <= ${SUPERSESSION_DISTANCE_THRESHOLD}
+          ORDER BY distance ASC
+          LIMIT ${SUPERSESSION_CANDIDATE_LIMIT}
+        `;
+
+        if (rows.length > 0) {
+          crossDocItemsForLlm.push({
+            statement,
+            candidates: rows.map((row) => ({ id: row.id, text: row.textDerived, distance: row.distance })),
+          });
+        }
+      }
+
+      for (let index = 0; index < crossDocItemsForLlm.length; index += SUPERSESSION_BATCH_SIZE) {
+        const batch = crossDocItemsForLlm.slice(index, index + SUPERSESSION_BATCH_SIZE);
+        const { decisions } = await this.openaiService.generateStatementBatchSupersessionJudgments({
+          items: batch.map((item) => ({
+            statement: item.statement.textDerived,
+            candidateRole: "new",
+            candidates: item.candidates.map((candidate) => ({ id: candidate.id, text: candidate.text })),
+          })),
+        });
+
+        for (let batchIndex = 0; batchIndex < batch.length; batchIndex++) {
+          const decision = decisions[batchIndex];
+          if (decision?.candidateId && decision.confidence >= SUPERSESSION_CONFIDENCE_THRESHOLD) {
+            const matchedCandidate = batch[batchIndex].candidates.find((candidate) => candidate.id === decision.candidateId);
+            const distance = matchedCandidate ? matchedCandidate.distance : 0;
+            candidateEdges.push({
+              sourceId: batch[batchIndex].statement.id,
+              targetId: decision.candidateId,
+              confidence: decision.confidence,
+              distance,
+              weight: decision.confidence * (1 - distance),
+            });
+          }
+        }
+      }
     }
 
-    return this.prisma.projectDocumentStatement.findUnique({ where: { id: judgment.candidateId } });
+    // RESOLVE GRAPH EDGES WITH GREEDY MAXIMUM WEIGHT MATCHING
+    const resolvedEdges = this._resolveSupersessionGraph(candidateEdges);
+    let supersessionsLinked = 0;
+
+    for (const { sourceId, targetId } of resolvedEdges) {
+      const sourceState = desiredStates.get(sourceId);
+      const targetState = desiredStates.get(targetId);
+      const targetStatement = statementById.get(targetId);
+
+      if (!sourceState || !targetState || !targetStatement) {
+        continue;
+      }
+
+      sourceState.replacedByStatementId = targetId;
+      sourceState.decisionStatus = ProjectDocumentDecisionStatus.superseded;
+      sourceState.validUntil = targetStatement.occurredAt;
+      targetState.replacesPriorStatementId = sourceId;
+      supersessionsLinked++;
+    }
+
+    // ATOMIC PERSISTENCE
+    const updates: Prisma.PrismaPromise<ProjectDocumentStatement>[] = [];
+
+    for (const statement of statements) {
+      const state = desiredStates.get(statement.id);
+      if (!state) {
+        continue;
+      }
+
+      updates.push(
+        this.prisma.projectDocumentStatement.update({
+          where: { id: statement.id },
+          data: {
+            validFrom: state.validFrom,
+            validUntil: state.validUntil,
+            decisionStatus: state.decisionStatus,
+            implementationStatus: state.implementationStatus,
+            replacesPriorStatementId: state.replacesPriorStatementId,
+            replacedByStatementId: state.replacedByStatementId,
+          },
+        }),
+      );
+    }
+
+    await this.prisma.$transaction(updates);
+
+    this.logger.log(
+      `Threading complete for project ${projectId} in ${Date.now() - startedAt}ms: ${statements.length} statements processed, ${supersessionsLinked} supersessions linked across ${candidateEdges.length} candidate edges`,
+    );
+
+    return {
+      statementsReconciled: statements.length,
+      supersessionsLinked,
+    };
   }
 
   /**

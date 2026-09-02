@@ -15,7 +15,7 @@ export const ProjectDocumentReadSchema = z
         "Optional extracted statement UUID. Reads its source document and reports whether the source wording was located.",
       ),
   })
-  .refine((input) => input.documentId || input.statementId, {
+  .refine((input) => input.documentId ?? input.statementId, {
     message: "documentId or statementId is required",
   });
 

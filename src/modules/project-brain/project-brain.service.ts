@@ -262,7 +262,7 @@ export class ProjectBrainService {
     }
 
     if (documentId && statement && documentId !== statement.projectDocumentId) {
-      throw new Error(`Statement ${statementId} does not belong to document ${documentId}`);
+      throw new Error(`Statement ${statementId ?? ""} does not belong to document ${documentId}`);
     }
 
     const resolvedDocumentId = documentId ?? statement?.projectDocumentId;

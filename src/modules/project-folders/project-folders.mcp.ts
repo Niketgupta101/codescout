@@ -93,10 +93,7 @@ export class ProjectFolderMcp {
     });
 
     try {
-      return await this.projectFolderService.importProjectFolder(
-        input.projectFolderId,
-        input.force,
-      );
+      return await this.projectFolderService.importProjectFolder(input.projectFolderId);
     } catch (error) {
       const serviceAccountEmail = this.googleDriveService.getServiceAccountEmail();
       this.logger.error("Failed to import project folder", error);
