@@ -62,7 +62,7 @@ export class IndexingService {
     readonly openaiService: OpenAIService,
   ) {}
 
-  async projectDocumentIndex(projectDocumentId: string): Promise<void> {
+  async projectDocumentIndex(projectDocumentId: string): Promise<boolean> {
     const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({ where: { id: projectDocumentId } });
 
     this.logger.log(`Indexing document ${projectDocument.path}`);
@@ -82,9 +82,11 @@ export class IndexingService {
 
       const { embedding } = await this.openaiService.generateEmbedding({ input: summary });
 
+      // the terminal status belongs to projectDocumentProcess, which only marks a document completed once
+      // extraction has run too
       await this.prisma.projectDocument.update({
         where: { id: projectDocument.id },
-        data: { summary, status: "completed" },
+        data: { summary },
       });
 
       // summary embedding is an unsupported halfvec column so it is written via raw sql
@@ -93,6 +95,8 @@ export class IndexingService {
         SET "summaryEmbedding" = ${`[${embedding.join(",")}]`}::halfvec
         WHERE id = ${projectDocument.id}::uuid
       `;
+
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to index document ${projectDocument.path}`, error);
@@ -101,7 +105,41 @@ export class IndexingService {
         where: { id: projectDocument.id },
         data: { status: "failed", error: message },
       });
+
+      return false;
     }
+  }
+
+  /**
+   * Runs the full per-document pipeline and owns the document's terminal status.
+   * A document counts as completed only once extraction has run, so a run that dies partway through - an exhausted
+   * inference balance being the usual cause - leaves every document it touched retryable instead of leaving one
+   * summarized but statement-less document that later imports would skip as already done.
+   * @param projectDocumentId - the document to index, classify and extract
+   * @returns Whether the document came out fully processed.
+   */
+  async projectDocumentProcess(projectDocumentId: string): Promise<boolean> {
+    const indexed = await this.projectDocumentIndex(projectDocumentId);
+
+    // indexing already recorded the failure, and the later stages call the same failing provider
+    if (!indexed) {
+      return false;
+    }
+
+    // classification is non-critical, so its outcome does not decide the terminal status; a wrong genre or date is
+    // cheaper to live with than the destructive re-extraction that marking the document failed would trigger
+    await this.projectDocumentClassify(projectDocumentId);
+
+    const extracted = await this.projectDocumentExtract(projectDocumentId);
+
+    await this.prisma.projectDocument.update({
+      where: { id: projectDocumentId },
+      data: extracted
+        ? { status: "completed", error: null }
+        : { status: "failed", error: "Failed to extract document knowledge" },
+    });
+
+    return extracted;
   }
 
   /**
@@ -153,8 +191,8 @@ export class IndexingService {
   /**
    * Extracts the local knowledge graph (topics, statements, action items, references) from a document.
    * Only LOCAL fields are written here; threading and bi-temporal validity are left to the reconciler.
-   * Non-critical: on failure the document stays indexed without statements rather than failing.
    * @param projectDocumentId - the document to extract from
+   * @returns Whether extraction succeeded; the caller records it in the document's status.
    */
   async projectDocumentExtract(projectDocumentId: string): Promise<boolean> {
     const projectDocument = await this.prisma.projectDocument.findUniqueOrThrow({
@@ -432,7 +470,6 @@ export class IndexingService {
       );
       return true;
     } catch (error) {
-      // extraction is enrichment: log and leave the document indexed without statements rather than failing it
       this.logger.error(`Failed to extract document ${projectDocument.path}`, error);
       return false;
     }
