@@ -7,6 +7,7 @@ import { GenerateDocumentClassificationOptions } from "./types/generate-document
 import { GenerateDocumentExtractionOptions } from "./types/generate-document-extraction-options.type";
 import { OpenAiDocumentExtraction } from "./types/openai-document-extraction.type";
 import { GenerateStatementSupersessionJudgmentOptions } from "./types/generate-statement-supersession-judgment-options.type";
+import { GenerateStatementSupersessionJudgmentsOptions } from "./types/generate-statement-supersession-judgments-options.type";
 import { GenerateTopicGroupingOptions } from "./types/generate-topic-grouping-options.type";
 import { OpenAiTopicGroup } from "./types/openai-topic-group.type";
 import { GenerateActionItemGroupingOptions } from "./types/generate-action-item-grouping-options.type";
@@ -146,6 +147,15 @@ const STATEMENT_SUPERSESSION_SYSTEM_PROMPT =
   "or is a broad strategy or general direction that does not specifically overturn the earlier choice. Different " +
   "subjects never supersede each other. Candidates are ordered nearest-first. Return the first true supersession's " +
   "candidateId and a confidence between 0 and 1, or candidateId null when none qualifies.";
+
+const STATEMENT_BATCH_SUPERSESSION_SYSTEM_PROMPT =
+  "For each numbered statement, decide whether one of its ordered candidate statements forms a true supersession - it " +
+  "explicitly replaces, overrides, or reverses the statement's specific decision or fact. Supersession requires BOTH " +
+  "that the two statements are about the SAME specific subject or decision AND that the newer one changes the earlier " +
+  "outcome. It is NOT supersession when the newer statement merely relates to the earlier one, confirms/agrees with/" +
+  "restates/refines it, or is a broad strategy or general direction that does not specifically overturn the earlier " +
+  "choice. Different subjects never supersede each other. Return one decision per numbered input: select the first " +
+  "candidateId that qualifies with confidence between 0 and 1, or candidateId null when none qualifies.";
 
 const REFERENCE_RESOLUTION_SYSTEM_PROMPT =
   "You decide whether a candidate is the thing a document reference points to. You are given the reference text, the " +
@@ -579,6 +589,122 @@ export class OpenAIService {
     return {
       candidateId,
       confidence: parsed.confidence,
+      usage: {
+        inputTokens: response.usage?.prompt_tokens ?? 0,
+        outputTokens: response.usage?.completion_tokens ?? 0,
+      },
+    };
+  }
+
+  async generateStatementBatchSupersessionJudgments({
+    items,
+    model = this.inferenceModelDefault as ChatModel,
+  }: GenerateStatementSupersessionJudgmentsOptions): Promise<{
+    decisions: { candidateId: string | null; confidence: number }[];
+    usage: OpenAiTokenUsage;
+  }> {
+    if (items.length === 0) {
+      return { decisions: [], usage: { inputTokens: 0, outputTokens: 0 } };
+    }
+
+    const itemsBlock = items
+      .map((item, index) => {
+        const candidateBlock = item.candidates.length
+          ? item.candidates
+              .map((candidate, candidateIndex) => `  ${candidateIndex + 1}. [${candidate.id}] ${candidate.text}`)
+              .join("\n")
+          : "  (none)";
+        const roleHeader =
+          item.candidateRole === "prior"
+            ? `New statement:\n${item.statement}\nCandidate prior statements, ordered nearest-first:\n${candidateBlock}`
+            : `Prior statement:\n${item.statement}\nCandidate newer statements, ordered nearest-first:\n${candidateBlock}`;
+        const hintSuffix = item.hint ? `\n\nThe new statement indicated it changes: ${item.hint}` : "";
+
+        return `${index}. ${roleHeader}${hintSuffix}`;
+      })
+      .join("\n\n");
+
+    const response = await this.openai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: STATEMENT_BATCH_SUPERSESSION_SYSTEM_PROMPT },
+        { role: "user", content: `Statements:\n${itemsBlock}\n\nReturn the first qualifying candidateId per statement with confidence, or candidateId null.` },
+      ],
+      max_completion_tokens: 4096,
+      ...this.inferenceReasoningOptions,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "statement_batch_supersession_judgments",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              decisions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    index: { type: "integer" },
+                    candidateId: { type: ["string", "null"] },
+                    confidence: { type: "number" },
+                  },
+                  required: ["index", "candidateId", "confidence"],
+                },
+              },
+            },
+            required: ["decisions"],
+          },
+        },
+      },
+    });
+
+    const raw = response.choices[0]?.message?.content;
+
+    if (!raw) {
+      throw new Error("No statement batch supersession judgments generated from OpenAI");
+    }
+
+    let parsed: {
+      decisions: {
+        index: number;
+        candidateId: string | null;
+        confidence: number;
+      }[];
+    };
+
+    try {
+      parsed = JSON.parse(raw) as typeof parsed;
+    } catch {
+      // local models may emit thinking text or prose before the JSON; extract the first JSON object
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error("Failed to parse statement batch supersession judgments JSON from OpenAI response");
+      }
+      parsed = JSON.parse(jsonMatch[0]) as typeof parsed;
+    }
+
+    const decisions: { candidateId: string | null; confidence: number }[] = Array.from(
+      { length: items.length },
+      () => ({ candidateId: null, confidence: 0 }),
+    );
+
+    for (const decision of parsed.decisions) {
+      if (!Number.isInteger(decision.index) || decision.index < 0 || decision.index >= items.length) {
+        continue;
+      }
+
+      const selected = items[decision.index].candidates.find((candidate) => candidate.id === decision.candidateId);
+      decisions[decision.index] = {
+        candidateId: selected?.id ?? null,
+        confidence: decision.confidence,
+      };
+    }
+
+    return {
+      decisions,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
