@@ -62,7 +62,25 @@ export class GoogleDriveService {
   async listFolderFiles(listFolderFilesInput: { folderId: string }): Promise<GoogleDriveFile[]> {
     this._assertValidDriveId(listFolderFilesInput.folderId);
     const drive = this._getDriveClient();
+    await this._assertFolderAccessible({ drive, folderId: listFolderFilesInput.folderId });
+
     return this._listFolderRecursive({ drive, folderId: listFolderFilesInput.folderId, parentPath: "" });
+  }
+
+  // a folder the service account cannot read lists as empty rather than failing, which an import would report as
+  // "nothing changed". reading the folder itself does fail, so the caller learns it has to be shared
+  async _assertFolderAccessible(assertFolderAccessibleInput: { drive: drive_v3.Drive; folderId: string }) {
+    const { drive, folderId } = assertFolderAccessibleInput;
+
+    try {
+      await drive.files.get({ fileId: folderId, fields: "id, mimeType", supportsAllDrives: true });
+    } catch (error) {
+      this.logger.error(`Cannot access google drive folder ${folderId}`, error);
+
+      throw new Error(
+        `Google Drive folder ${folderId} is not accessible. Share it with ${this.getServiceAccountEmail()} and try again.`,
+      );
+    }
   }
 
   /** Downloads stored files directly and exports native Google Workspace files. */
@@ -82,7 +100,10 @@ export class GoogleDriveService {
 
     const response = format?.exportMimeType
       ? await drive.files.export({ fileId: file.id, mimeType: format.exportMimeType }, { responseType: "arraybuffer" })
-      : await drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "arraybuffer" });
+      : await drive.files.get(
+          { fileId: file.id, alt: "media", supportsAllDrives: true },
+          { responseType: "arraybuffer" },
+        );
 
     const filename = file.name.toLowerCase().endsWith(extension) ? file.name : `${file.name}${extension}`;
 
@@ -104,6 +125,7 @@ export class GoogleDriveService {
     const { data }: { data: drive_v3.Schema$File } = await drive.files.get({
       fileId: getFileInput.fileId,
       fields: "id, name, mimeType, modifiedTime, size, parents",
+      supportsAllDrives: true,
     });
 
     if (!data.id || !data.name) {
@@ -181,6 +203,9 @@ export class GoogleDriveService {
         fields: "nextPageToken, files(id, name, mimeType, modifiedTime, size)",
         pageSize: 1000,
         pageToken,
+        // without these a folder on a shared drive lists as empty instead of erroring, which reads as "nothing to import"
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
       });
 
       const entries = data.files ?? [];
