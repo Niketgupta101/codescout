@@ -143,6 +143,40 @@ export class ProjectFolderMcp {
   }
 
   /**
+   * Threads a project's statements into supersession chains and recomputes bi-temporal validity.
+   * Safe to re-run: every statement's state is recomputed from the extraction layer each pass.
+   */
+  @Tool({
+    name: "projectStatementThread",
+    description:
+      "Threads a project's statements into supersession chains: detects which statements replace earlier ones, " +
+      "links them, and recomputes each statement's validity window and decision/implementation status. " +
+      "Run after projectReconcile. Safe to re-run - each pass recomputes the whole graph from the extracted " +
+      "statements, so improved threading logic can be applied without re-indexing documents.",
+    parameters: z.object({
+      projectId: z.uuid().describe("Project UUID whose statements should be threaded."),
+    }),
+  })
+  async projectStatementThread(
+    projectStatementThreadInput: { projectId: string },
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectStatementThreadInput.projectId,
+      actor,
+    });
+
+    this.logger.log(`MCP projectStatementThread: project=${project.id}`);
+
+    const result = await this.projectReconcileService.threadStatements(project.id);
+
+    return { projectId: project.id, ...result };
+  }
+
+  /**
    * Creates a document manually with raw content, then indexes and classifies it.
    * Useful for content generated on-the-fly by an LLM (e.g., email extracted via another tool).
    */
