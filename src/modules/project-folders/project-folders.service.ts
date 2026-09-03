@@ -1,6 +1,6 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
-import { DocumentStatus, Prisma } from "@prisma/client";
+import { DocumentStatus, Prisma, ProjectFolderImportStatus } from "@prisma/client";
 import type { ProjectFolder } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EnvService } from "../env/env.service";
@@ -15,7 +15,7 @@ import type { ProjectFolderImportResult } from "./types/project-folder-import-re
 import type { ProjectFolderImportIssue } from "./types/project-folder-import-issue.type";
 
 @Injectable()
-export class ProjectFolderService {
+export class ProjectFolderService implements OnModuleInit {
   readonly logger = new Logger(ProjectFolderService.name);
 
   // guards the scheduled sweep against overlapping itself; see _handleProjectFolderSync
@@ -29,6 +29,21 @@ export class ProjectFolderService {
     readonly projectReconcileService: ProjectReconcileService,
     readonly envService: EnvService,
   ) {}
+
+  async onModuleInit() {
+    const { count } = await this.prisma.projectFolderImport.updateMany({
+      where: { status: ProjectFolderImportStatus.running },
+      data: {
+        status: ProjectFolderImportStatus.failed,
+        error: "Import was interrupted by a server restart. Re-run the import to continue where it stopped.",
+        finishedAt: new Date(),
+      },
+    });
+
+    if (count > 0) {
+      this.logger.warn(`Marked ${count} interrupted folder import(s) as failed on startup`);
+    }
+  }
 
   async create(createInput: { projectId: string; createProjectFolderDto: CreateProjectFolderDto }) {
     const { projectId, createProjectFolderDto } = createInput;
@@ -79,27 +94,108 @@ export class ProjectFolderService {
     return projectFolder;
   }
 
-  async importProjectFolder(projectFolderId: string): Promise<ProjectFolderImportResult> {
+  /** Starts an import in the background and returns immediately with the row the caller polls for its outcome. */
+  async projectFolderImportStart(projectFolderId: string) {
+    const projectFolder = await this.findOne(projectFolderId);
+
+    // a second concurrent pass would duplicate every drive download and race on the same documents
+    const runningImport = await this.prisma.projectFolderImport.findFirst({
+      where: { projectFolderId, status: ProjectFolderImportStatus.running },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (runningImport) {
+      this.logger.log(`Import already running for folder ${projectFolderId}, returning it`);
+
+      return runningImport;
+    }
+
+    const projectFolderImport = await this.prisma.projectFolderImport.create({
+      data: { projectId: projectFolder.projectId, projectFolderId },
+    });
+
+    // deliberately not awaited; the caller gets the id now and polls for the outcome
+    void this._projectFolderImportRun(projectFolderImport.id, projectFolderId);
+
+    return projectFolderImport;
+  }
+
+  async projectFolderImportFindOne(findOneInput: { projectId: string; projectFolderImportId: string }) {
+    const projectFolderImport = await this.prisma.projectFolderImport.findFirst({
+      where: { id: findOneInput.projectFolderImportId, projectId: findOneInput.projectId },
+    });
+
+    if (!projectFolderImport) {
+      throw LocaleException.notFound();
+    }
+
+    return projectFolderImport;
+  }
+
+  async _projectFolderImportRun(projectFolderImportId: string, projectFolderId: string) {
+    try {
+      const result = await this.importProjectFolder(projectFolderId, projectFolderImportId);
+
+      await this.prisma.projectFolderImport.update({
+        where: { id: projectFolderImportId },
+        data: {
+          status: ProjectFolderImportStatus.completed,
+          documentsChanged: result.documentsChanged,
+          issues: result.issues,
+          currentPath: null,
+          finishedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Background import failed for folder ${projectFolderId}`, error);
+
+      await this.prisma.projectFolderImport.update({
+        where: { id: projectFolderImportId },
+        data: {
+          status: ProjectFolderImportStatus.failed,
+          error: message,
+          currentPath: null,
+          finishedAt: new Date(),
+        },
+      });
+    }
+  }
+
+  async importProjectFolder(
+    projectFolderId: string,
+    projectFolderImportId?: string,
+  ): Promise<ProjectFolderImportResult> {
     const projectFolder = await this.findOne(projectFolderId);
 
     // google drive is the only source supported
     if (projectFolder.provider === "googleDrive") {
-      return this._googleDriveProjectFolderImport(projectFolder);
+      return this._googleDriveProjectFolderImport(projectFolder, projectFolderImportId);
     } else {
       throw new Error(`Unsupported project folder provider: ${projectFolder.provider as string}`);
     }
   }
 
   // crawls a linked google drive folder, routing each supported file to create or re-import
-  async _googleDriveProjectFolderImport(projectFolder: ProjectFolder): Promise<ProjectFolderImportResult> {
+  async _googleDriveProjectFolderImport(
+    projectFolder: ProjectFolder,
+    projectFolderImportId?: string,
+  ): Promise<ProjectFolderImportResult> {
     const files = await this.googleDriveService.listFolderFiles({ folderId: projectFolder.providerId });
 
     this.logger.log(`Importing ${files.length} drive files for project ${projectFolder.projectId}`);
+
+    await this._projectFolderImportProgressReport({ projectFolderImportId, data: { filesTotal: files.length } });
 
     const issues: ProjectFolderImportIssue[] = [];
     let documentsChanged = 0;
 
     for (const [index, file] of files.entries()) {
+      await this._projectFolderImportProgressReport({
+        projectFolderImportId,
+        data: { filesProcessed: index, currentPath: file.path, documentsChanged, issues },
+      });
+
       // skip unsupported files
       const isSupported =
         this.markitdownService.isSupportedMimeType(file.mimeType) ||
@@ -173,6 +269,11 @@ export class ProjectFolderService {
       }
     }
 
+    await this._projectFolderImportProgressReport({
+      projectFolderImportId,
+      data: { filesProcessed: files.length, currentPath: null, documentsChanged, issues },
+    });
+
     await this.prisma.projectFolder.update({
       where: { id: projectFolder.id },
       data: { lastSyncedAt: new Date() },
@@ -193,6 +294,29 @@ export class ProjectFolderService {
     );
 
     return { projectFolderId: projectFolder.id, documentsChanged, issues };
+  }
+
+  async _projectFolderImportProgressReport(progressReportInput: {
+    projectFolderImportId?: string;
+    data: {
+      filesTotal?: number;
+      filesProcessed?: number;
+      documentsChanged?: number;
+      currentPath?: string | null;
+      issues?: ProjectFolderImportIssue[];
+    };
+  }) {
+    const { projectFolderImportId, data } = progressReportInput;
+
+    if (!projectFolderImportId) {
+      return;
+    }
+
+    try {
+      await this.prisma.projectFolderImport.update({ where: { id: projectFolderImportId }, data });
+    } catch (error) {
+      this.logger.warn(`Failed to record import progress for ${projectFolderImportId}`, error);
+    }
   }
 
   /**

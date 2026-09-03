@@ -5,7 +5,7 @@ import { FindAllProjectFoldersDto } from "./dtos/find-all-project-folders.dto";
 import { Entity } from "src/decorators/entity.decorator";
 import { ProjectFolderEntity } from "./entities/project-folder.entity";
 import { ProjectFolderPageEntity } from "./entities/project-folder-page.entity";
-import { ProjectFolderImportResultEntity } from "./entities/project-folder-import-result.entity";
+import { ProjectFolderImportEntity } from "./entities/project-folder-import.entity";
 
 @Controller("project/:projectId/project-folders")
 @Entity({ type: ProjectFolderEntity })
@@ -29,8 +29,17 @@ export class ProjectFoldersController {
   }
 
   @Post(":projectFolderId/import")
-  @Entity({ type: ProjectFolderImportResultEntity })
+  @Entity({ type: ProjectFolderImportEntity })
   async import(@Param("projectFolderId") projectFolderId: string) {
-    return this.projectFolderService.importProjectFolder(projectFolderId);
+    return this.projectFolderService.projectFolderImportStart(projectFolderId);
+  }
+
+  @Get(":projectFolderId/import/:projectFolderImportId")
+  @Entity({ type: ProjectFolderImportEntity })
+  async importFindOne(
+    @Param("projectId") projectId: string,
+    @Param("projectFolderImportId") projectFolderImportId: string,
+  ) {
+    return this.projectFolderService.projectFolderImportFindOne({ projectId, projectFolderImportId });
   }
 }

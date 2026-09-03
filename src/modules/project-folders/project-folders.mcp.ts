@@ -69,42 +69,79 @@ export class ProjectFolderMcp {
     };
   }
 
-  /**
-   * Imports files from a linked Google Drive folder into the project.
-   * Throws a clear error if the service account lacks access to the folder.
-   */
   @Tool({
     name: "projectFolderImport",
     description:
-      "Imports files from a linked Google Drive folder into the project's knowledge base. " +
-      "Requires that the folder has been shared with the service account email shown during projectFolderCreate.",
+      "Starts importing files from a linked Google Drive folder into the project's knowledge base. " +
+      "Returns immediately with a projectFolderImportId - the import runs in the background, since a large " +
+      "folder takes far longer than one request. Poll projectFolderImportStatus with that id to follow progress " +
+      "and see per-file issues. Requires that the folder has been shared with the service account email shown " +
+      "during projectFolderCreate. Safe to re-run: files that have not changed since the last import are skipped.",
     parameters: ProjectFolderImportSchema,
   })
   async projectFolderImport(
-    input: ProjectFolderImportInput,
+    projectFolderImportInput: ProjectFolderImportInput,
     _context: Context,
     request?: McpToolRequest,
   ) {
     const actor = await this.mcpActorService.actorResolve(request);
 
     await this.mcpActorService.projectFindOneForAccessCheck({
-      projectId: input.projectId,
+      projectId: projectFolderImportInput.projectId,
       actor,
     });
 
     try {
-      return await this.projectFolderService.importProjectFolder(input.projectFolderId);
+      const projectFolderImport = await this.projectFolderService.projectFolderImportStart(
+        projectFolderImportInput.projectFolderId,
+      );
+
+      return {
+        projectFolderImportId: projectFolderImport.id,
+        status: projectFolderImport.status,
+        message: `Import started in the background. Poll projectFolderImportStatus with projectFolderImportId ${projectFolderImport.id} to follow progress.`,
+      };
     } catch (error) {
       const serviceAccountEmail = this.googleDriveService.getServiceAccountEmail();
-      this.logger.error("Failed to import project folder", error);
+      this.logger.error("Failed to start project folder import", error);
 
       return {
         success: false,
         error: String(error),
         serviceAccountEmail,
-        message: `Import failed. Ensure the Google Drive folder has been shared with ${serviceAccountEmail} (Viewer access is required).`,
+        message: `Could not start the import. If the folder is not reachable, ensure it has been shared with ${serviceAccountEmail} (Viewer access is required).`,
       };
     }
+  }
+
+  @Tool({
+    name: "projectFolderImportStatus",
+    description:
+      "Reports the progress and outcome of a background folder import started by projectFolderImport. " +
+      "Returns status (running, completed, failed), how many files have been processed out of the total, " +
+      "how many documents changed, the file currently being processed, and any per-file issues. " +
+      "A failed or interrupted import can simply be re-run - already-imported files are skipped.",
+    parameters: z.object({
+      projectId: z.uuid().describe("Project UUID owning the import."),
+      projectFolderImportId: z.uuid().describe("Import UUID returned by projectFolderImport."),
+    }),
+  })
+  async projectFolderImportStatus(
+    projectFolderImportStatusInput: { projectId: string; projectFolderImportId: string },
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectFolderImportStatusInput.projectId,
+      actor,
+    });
+
+    return this.projectFolderService.projectFolderImportFindOne({
+      projectId: project.id,
+      projectFolderImportId: projectFolderImportStatusInput.projectFolderImportId,
+    });
   }
 
   /**
