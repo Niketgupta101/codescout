@@ -105,9 +105,11 @@ export const DOCUMENT_REFERENCES_SYSTEM_PROMPT =
   "row or entry carrying a status as one action item, including rows already marked complete or cancelled, and take each " +
   "row's status from what that row records. Exclude social plans, meals, travel, and " +
   "other personal or administrative bullets. Preserve formulas, identifiers, field names, and operands verbatim in " +
-  "descriptions rather than guessing translations for ambiguous domain terms. Return at most 30 action items and 6 " +
-  "references for one content chunk, prioritizing concrete current commitments and material dependencies. Only assert what the document supports - " +
-  "do not invent.";
+  "descriptions rather than guessing translations for ambiguous domain terms. Return at most 50 action items and 6 " +
+  "references for one content chunk. Never drop an item because it is already complete or cancelled - a finished row " +
+  "is exactly as valuable as an open one, and omitting it makes the record claim the work is still outstanding. When a " +
+  "chunk holds more items than the cap, keep the ones whose status the source states outright over ones you must infer. " +
+  "Only assert what the document supports - do not invent.";
 
 export const STATEMENT_CURATION_SYSTEM_PROMPT = `You filter extracted statements for a searchable project knowledge base.
 
@@ -126,6 +128,8 @@ Return exactly one decision for every supplied zero-based index, in the same ord
 Set keep=true only when textRaw itself establishes: (1) the concrete deliverable or verifiable outcome in the description, and (2) that the work was accepted, assigned, or is being tracked - rather than a requirement, idea, hope, inference, or general direction. The description must stand alone and identify the relevant system, artifact, data, recipient, and purpose when needed.
 
 An owner is optional. Keep an item with no owner when textRaw records its status or assignment, as a task list, tracker row, or checklist entry does. When an owner IS given, textRaw must establish that person or named team; drop the item when it does not.
+
+Keep items the source records as already complete or cancelled. A finished or abandoned item belongs in the record exactly as much as an open one, and dropping it makes the record claim the work is still outstanding.
 
 Use the supplied project context as the relevance boundary and drop unrelated commitments.
 
