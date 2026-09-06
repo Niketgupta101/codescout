@@ -17,7 +17,8 @@ export type OpenAiDocumentExtraction = {
   }[];
   actionItems: {
     topicName: string | null;
-    owner: string;
+    // null when the source records the work without naming who is accountable, as a task list or tracker row does
+    owner: string | null;
     description: string;
     expectedBy: string | null;
     status: string;

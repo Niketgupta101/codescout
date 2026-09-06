@@ -9,6 +9,7 @@ import {
   ProjectDocumentImplementationStatus,
   ProjectDocumentReferenceResolution,
   ProjectDocumentStatementType,
+  ProjectDocumentType,
   ProjectTopicType,
 } from "@prisma/client";
 import type { ProjectDocumentStatement, ProjectTopic } from "@prisma/client";
@@ -26,6 +27,7 @@ import {
   RESOLUTION_JUDGMENT_VERSION,
   actionItemResolutionDigest,
 } from "./utils/action-item-resolution-digest.util";
+import { aggregateMemberStatus } from "./utils/aggregate-member-status.util";
 
 // raised from 0.6 after a seed inspection showed the judge over-linking relatedness/strategy as supersession (F16)
 const SUPERSESSION_CONFIDENCE_THRESHOLD = 0.75;
@@ -47,6 +49,14 @@ const RESOLUTION_CANDIDATE_LIMIT = 5;
 // measured over this corpus: 0.45 would have starved 41% of items of any evidence at all, 0.65 starves none.
 // it only trims the tail - the candidate limit does the real selecting
 const RESOLUTION_DOCUMENT_DISTANCE_THRESHOLD = 0.65;
+// genres that state intent rather than record events. a spec saying "there are two views" describes what the
+// system should be, and reading it as proof the work happened is the same mistake as judging code from its summary
+const RESOLUTION_EXCLUDED_EVIDENCE_TYPES: ProjectDocumentType[] = [
+  ProjectDocumentType.conceptPaper,
+  ProjectDocumentType.scopeDocument,
+  ProjectDocumentType.userStory,
+  ProjectDocumentType.implementationPlan,
+];
 
 // member statements sampled per doc-topic for the grouping prompt and drop-routing embeddings (keeps prompts bounded)
 const TOPIC_MEMBER_STATEMENT_SAMPLE = 8;
@@ -469,6 +479,7 @@ export class ProjectReconcileService {
 
     if (documentActionItems.length === 0) {
       await this._refreshCanonicalActionItemStaleness(projectId);
+      await this._refreshCanonicalActionItemStatus(projectId);
       return { actionItemsCreated: 0, actionItemsMatched: 0 };
     }
 
@@ -484,7 +495,7 @@ export class ProjectReconcileService {
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
       const { embeddings } = await this.openaiService.generateEmbeddings(
-        batch.map((item) => `${item.owner}\n${item.description}`),
+        batch.map((item) => `${item.owner ?? ""}\n${item.description}`),
       );
       const candidateSets = await this._mapWithConcurrency(batch, 4, (_, itemIndex) =>
         this._findNearestActionItemAnchors({ projectId, embedding: embeddings[itemIndex] }),
@@ -564,6 +575,7 @@ export class ProjectReconcileService {
     }
 
     await this._refreshCanonicalActionItemStaleness(projectId);
+    await this._refreshCanonicalActionItemStatus(projectId);
     this.logger.log(
       `Folded ${actionItemsLinked} doc-level action items into ${matchedCanonicalIds.size} existing canonical items, created ${actionItemsCreated} new`,
     );
@@ -572,14 +584,14 @@ export class ProjectReconcileService {
   }
 
   _buildBoundedActionItemBatches<
-    T extends { description: string; owner: string; projectDocumentId?: string },
+    T extends { description: string; owner: string | null; projectDocumentId?: string },
   >(items: T[]): T[][] {
     const batches: T[][] = [];
     let current: T[] = [];
     let currentTokens = 0;
 
     for (const item of items) {
-      const itemTokens = encode(`${item.owner}\n${item.description}`).length;
+      const itemTokens = encode(`${item.owner ?? ""}\n${item.description}`).length;
       const exceedsCount = current.length >= ACTION_ITEM_GROUPING_BATCH_SIZE;
       const exceedsTokens = current.length > 0 && currentTokens + itemTokens > ACTION_ITEM_GROUPING_BATCH_TOKENS;
       if (exceedsCount || exceedsTokens) {
@@ -607,7 +619,7 @@ export class ProjectReconcileService {
     existingActionItems,
     existingActionItemById,
   }: {
-    batch: { description: string; owner: string; status: ProjectDocumentActionItemStatus }[];
+    batch: { description: string; owner: string | null; status: ProjectDocumentActionItemStatus }[];
     candidateSets: { id: string }[][];
     existingActionItems: { id: string; title: string; description: string; owner: string | null }[];
     existingActionItemById: Map<string, { id: string; title: string; description: string; owner: string | null }>;
@@ -673,7 +685,7 @@ export class ProjectReconcileService {
     candidateActionItemIdsByIndex,
     existingActionItemIds,
   }: {
-    actionItems: { description: string; owner: string }[];
+    actionItems: { description: string; owner: string | null }[];
     embeddings: number[][];
     groups: {
       matchActionItemId: string | null;
@@ -770,6 +782,46 @@ export class ProjectReconcileService {
       where: { projectId, ...(referencedIds.length > 0 ? { id: { notIn: referencedIds } } : {}) },
       data: { stale: true },
     });
+  }
+
+  // canonicalization creates items at the default open, so without this a freshly folded item ignores what its own
+  // members observed until a resolution run happens to touch it. resolved and human-pinned items keep their status
+  async _refreshCanonicalActionItemStatus(projectId: string): Promise<void> {
+    const items = await this.prisma.projectActionItem.findMany({
+      where: {
+        projectId,
+        origin: { not: ProjectDataOrigin.human },
+        statusSource: ProjectActionItemStatusSource.extracted,
+      },
+      select: {
+        id: true,
+        status: true,
+        documentActionItems: {
+          where: { suppressed: false },
+          select: { status: true, projectDocument: { select: { occurredAt: true } } },
+        },
+      },
+    });
+
+    const updates = items.flatMap((item) => {
+      if (item.documentActionItems.length === 0) {
+        return [];
+      }
+
+      const aggregate = aggregateMemberStatus(item.documentActionItems);
+
+      return aggregate === item.status
+        ? []
+        : [this.prisma.projectActionItem.update({ where: { id: item.id }, data: { status: aggregate } })];
+    });
+
+    for (let offset = 0; offset < updates.length; offset += RESOLUTION_WRITE_CHUNK_SIZE) {
+      await this.prisma.$transaction(updates.slice(offset, offset + RESOLUTION_WRITE_CHUNK_SIZE));
+    }
+
+    if (updates.length > 0) {
+      this.logger.log(`Refreshed extracted status on ${updates.length} canonical action item(s)`);
+    }
   }
 
   // retrieves a bounded candidate set; the LLM sees only these anchors, never the entire project's canonical list
@@ -1393,9 +1445,7 @@ export class ProjectReconcileService {
       const supporting = confident.filter((decision) => decision.verdict === "supports");
       const contradicting = confident.filter((decision) => decision.verdict === "contradicts");
 
-      let finalStatus: ProjectDocumentActionItemStatus = this._aggregateMemberStatus(
-        item.documentActionItems.map((member) => member.status),
-      );
+      let finalStatus: ProjectDocumentActionItemStatus = aggregateMemberStatus(item.documentActionItems);
       let statusSource: ProjectActionItemStatusSource = ProjectActionItemStatusSource.extracted;
       let resolvedByDocumentId: string | null = null;
       let reason: string | null = null;
@@ -1452,6 +1502,7 @@ export class ProjectReconcileService {
         resolvedByDocumentId,
         reason,
         evidenceQuote: supporting[0]?.evidenceQuote ?? null,
+        confidence: supporting[0]?.confidence ?? null,
         conflicted: supporting.length > 0 && contradicting.length > 0,
         candidateCount: evidence.candidates.length,
       });
@@ -1488,7 +1539,7 @@ export class ProjectReconcileService {
         continue;
       }
 
-      const aggregate = this._aggregateMemberStatus(item.documentActionItems.map((member) => member.status));
+      const aggregate = aggregateMemberStatus(item.documentActionItems);
 
       if (aggregate !== item.status) {
         updates.push(
@@ -1582,6 +1633,7 @@ export class ProjectReconcileService {
         AND s."textDerivedEmbedding" IS NOT NULL
         AND s."suppressed" = false
         AND d."occurredAt" > ${itemTime}
+        AND d."type"::text NOT IN (${Prisma.join(RESOLUTION_EXCLUDED_EVIDENCE_TYPES)})
         AND (s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) <= ${RESOLUTION_DOCUMENT_DISTANCE_THRESHOLD}
       ORDER BY s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec
       LIMIT ${RESOLUTION_CANDIDATE_LIMIT}
@@ -1602,23 +1654,5 @@ export class ProjectReconcileService {
           `${candidate.kind}:${candidate.id}:${createHash("sha256").update(candidate.text).digest("hex")}`,
       ),
     };
-  }
-
-  // aggregates a canonical item's member (extraction-time) statuses into a base, most-advanced-wins (lapsed is relational)
-  _aggregateMemberStatus(statuses: ProjectDocumentActionItemStatus[]): ProjectDocumentActionItemStatus {
-    const precedence: ProjectDocumentActionItemStatus[] = [
-      ProjectDocumentActionItemStatus.done,
-      ProjectDocumentActionItemStatus.inProgress,
-      ProjectDocumentActionItemStatus.blocked,
-      ProjectDocumentActionItemStatus.open,
-    ];
-
-    for (const status of precedence) {
-      if (statuses.includes(status)) {
-        return status;
-      }
-    }
-
-    return ProjectDocumentActionItemStatus.open;
   }
 }

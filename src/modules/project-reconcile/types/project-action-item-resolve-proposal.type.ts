@@ -11,6 +11,7 @@ export type ProjectActionItemResolveProposal = {
   resolvedByDocumentId: string | null;
   reason: string | null;
   evidenceQuote: string | null;
+  confidence: number | null;
   conflicted: boolean;
   candidateCount: number;
 };

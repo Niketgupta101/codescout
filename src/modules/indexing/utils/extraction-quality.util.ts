@@ -31,6 +31,19 @@ const isOwnerSupportedByEvidence = (owner: string, textRaw: string) => {
   return owners.every((candidate) => normalizedEvidence.includes(normalize(candidate)));
 };
 
+const INFERRED_COLLECTIVE_OWNER = /^(the group|group|the team|team|someone|unknown|unassigned|tbd|n\/a)$/i;
+
+// an owner is metadata, not a qualifying condition, so an unusable one is dropped while the item itself survives
+const resolveOwner = (owner: string | null, textRaw: string): string | null => {
+  const trimmed = owner?.trim();
+
+  if (!trimmed || INFERRED_COLLECTIVE_OWNER.test(trimmed) || !isOwnerSupportedByEvidence(trimmed, textRaw)) {
+    return null;
+  }
+
+  return trimmed;
+};
+
 export const filterRetrievalReadyStatements = <T extends OpenAiDocumentExtraction["statements"][number]>(
   statements: T[],
 ): T[] => {
@@ -76,30 +89,27 @@ export const filterStatementsDuplicatedByActions = <
 
 export const filterRetrievalReadyActionItems = <T extends OpenAiDocumentExtraction["actionItems"][number]>(
   actionItems: T[],
-): T[] => {
+): (Omit<T, "owner"> & { owner: string | null })[] => {
   const seen = new Set<string>();
 
-  return actionItems.filter((actionItem) => {
-    const owner = actionItem.owner.trim();
+  return actionItems.flatMap((actionItem) => {
     const description = normalize(actionItem.description);
     if (
-      !owner ||
       !description ||
       !actionItem.textRaw.trim() ||
-      /^(the group|group|the team|team|someone|unknown|unassigned|tbd|n\/a)$/i.test(owner) ||
-      !isOwnerSupportedByEvidence(owner, actionItem.textRaw) ||
       startsWithUnresolvedReferent(actionItem.description) ||
       hasVagueObject(actionItem.description)
     ) {
-      return false;
+      return [];
     }
 
-    const key = `${normalize(owner)}:${description}`;
+    const owner = resolveOwner(actionItem.owner, actionItem.textRaw);
+    const key = `${owner ? normalize(owner) : ""}:${description}`;
     if (seen.has(key)) {
-      return false;
+      return [];
     }
 
     seen.add(key);
-    return true;
+    return [{ ...actionItem, owner }];
   });
 };

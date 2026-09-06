@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 
 // bump for any change that would make a stored verdict wrong: the prompt, the json schema, the distance threshold,
 // the candidate limit, or how candidate text is built. a digest computed under an older version is discarded
-export const RESOLUTION_JUDGMENT_VERSION = 1;
+export const RESOLUTION_JUDGMENT_VERSION = 2;
 
 export type ActionItemResolutionDigestInput = {
   title: string;
