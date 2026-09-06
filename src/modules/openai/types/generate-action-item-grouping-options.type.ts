@@ -3,7 +3,7 @@ import { ChatModel } from "openai/resources/shared";
 export type GenerateActionItemGroupingOptions = {
   actionItems: {
     description: string;
-    owner: string;
+    owner: string | null;
     status: string;
     candidateActionItemIds: string[];
   }[];

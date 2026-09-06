@@ -216,9 +216,9 @@ export class IndexingService {
     const implementationStatuses: ProjectDocumentImplementationStatus[] = Object.values(
       ProjectDocumentImplementationStatus,
     ).filter((status) => status !== ProjectDocumentImplementationStatus.reverted);
-    const actionItemStatuses: ProjectDocumentActionItemStatus[] = Object.values(ProjectDocumentActionItemStatus).filter(
-      (status) => status !== ProjectDocumentActionItemStatus.lapsed,
-    );
+    // lapsed is locally observable when a source states a cancellation outright, so extraction may set it; the
+    // prompt forbids inferring it from silence, which is the case that must stay reconciler-only
+    const actionItemStatuses: ProjectDocumentActionItemStatus[] = Object.values(ProjectDocumentActionItemStatus);
 
     try {
       const projectContext = [

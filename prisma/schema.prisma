@@ -589,7 +589,8 @@ model ProjectDocumentActionItem {
   origin                 ProjectDataOrigin     @default(ai)
   suppressed             Boolean               @default(false)
 
-  owner                String
+  // null when the source tracks the work without naming who is accountable, as a task list or tracker row does
+  owner                String?
   description          String                          @db.Text
   // "next meeting" / "before launch" / a date - free text
   expectedBy           String?

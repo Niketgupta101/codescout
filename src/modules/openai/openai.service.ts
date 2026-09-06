@@ -33,7 +33,7 @@ import { EmbeddingModel } from "openai/resources/embeddings.js";
 import { ProjectTopicType } from "@prisma/client";
 import { ChatModel } from "openai/resources/shared.js";
 
-// exported so IndexingCostService can tokenize the exact prompt used at indexing time
+// exported so cost estimation can tokenize the exact prompts used at indexing time
 export const SUMMARY_SYSTEM_PROMPT =
   "You are a helpful assistant that generates concise file summaries with embedded tables of contents. " +
   "Write the summary in English; if the document is in another language, translate.";
@@ -51,7 +51,7 @@ const DOCUMENT_CLASSIFICATION_SYSTEM_PROMPT =
 // genre is clear from the opening and structure; cap input to keep classification cheap
 const DOCUMENT_CLASSIFICATION_MAX_CHARS = 16000;
 
-const DOCUMENT_STATEMENTS_SYSTEM_PROMPT = `You extract structured project knowledge from a document as topics and statements.
+export const DOCUMENT_STATEMENTS_SYSTEM_PROMPT = `You extract structured project knowledge from a document as topics and statements.
 
 Work through these steps:
 0. Use the supplied project context as the relevance boundary. When context is sparse, infer the primary project scope from the document title, summary, and dominant operational content. In mixed documents and transcripts, exclude standalone workplace discussion that does not materially affect that project's product, operations, integrations, contract, or delivery, even when it is detailed, repeated, or technically interesting.
@@ -76,30 +76,40 @@ Output rules:
 - Infer each statement's event date as an ISO date (YYYY-MM-DD) from context; use null when it has none.
 - Only assert what the document supports - do not invent.`;
 
-const DOCUMENT_REFERENCES_SYSTEM_PROMPT =
-  "You extract explicit action-item commitments and references from a project document. Use the supplied project " +
+export const DOCUMENT_REFERENCES_SYSTEM_PROMPT =
+  "You extract tracked work items and references from a project document. Use the supplied project " +
   "context as the relevance boundary and exclude commitments unrelated to that project's product, operations, " +
-  "integrations, contract, or delivery. An action item requires a " +
-  "specific accountable person or explicitly named responsible team, a concrete deliverable or verifiable outcome, and " +
-  "source evidence that somebody accepted or was assigned the work. Requirements, ideas, decisions, general intentions, " +
-  "recurring monitoring, meeting scheduling, administrative discussion, and vague requests such as 'follow up', 'apply " +
-  "pressure', or 'discuss it' are not action items unless the source establishes a concrete owner and outcome. Never use " +
-  "'The group' or an inferred collective as owner. Preserve jointly accountable named owners when explicit. Keep one " +
+  "integrations, contract, or delivery. An action item requires a concrete deliverable or verifiable outcome AND " +
+  "source evidence that the work was accepted, assigned, or is being tracked. A named owner, an explicit assignment, " +
+  "or a status the source itself records for the item all establish that. Requirements, ideas, decisions, general " +
+  "intentions, recurring monitoring, meeting scheduling, administrative discussion, and vague requests such as 'follow " +
+  "up', 'apply pressure', or 'discuss it' are not action items unless the source establishes a concrete outcome and " +
+  "that somebody is tracking it. Keep one " +
   "action per independently completable outcome; include multiple implementation steps in one action only when they serve " +
   "the same deliverable. The description must name the relevant system, artifact, recipient, and purpose when the source " +
   "supports them, and must stand alone outside the transcript. Action items capture owner, description, expectedBy, " +
-  "status (from the allowed set), blockedOn, and reason. References are pointers to other " +
+  "status (from the allowed set), blockedOn, and reason. " +
+  "owner: the accountable person or explicitly named responsible team when the source names one, otherwise null. Never " +
+  "infer an owner and never use 'The group' or a similar collective - return null instead. An action item with no stated " +
+  "owner is still valid when the source records its status or assignment. Preserve jointly accountable named owners when " +
+  "explicit. " +
+  "status: when the source states a status for the item, use that stated status mapped to the allowed set, including for " +
+  "work already finished or abandoned. Use lapsed only when the source explicitly says the item was cancelled, dropped, " +
+  "or is no longer being pursued - never infer it from silence. Otherwise use the status the evidence supports. " +
+  "References are pointers to other " +
   "documents, files, or prior work the document relies on: capture the referent text, what is expected from it, and a " +
   "complete minimal verbatim evidence span. Write every field in English; if the document is in another language, translate. textRaw is the one " +
   "exception - keep it as a verbatim span in the document's original language. When the source is an explicit Next " +
-  "Steps or Action Items section, inspect every bullet and return every bullet that names an accountable owner and a " +
-  "concrete project deliverable; do not stop after the first qualifying item. Exclude social plans, meals, travel, and " +
+  "Steps or Action Items section, inspect every bullet and return every bullet stating a concrete project deliverable; " +
+  "do not stop after the first qualifying item. When the source is a task list, tracker table, or checklist, treat every " +
+  "row or entry carrying a status as one action item, including rows already marked complete or cancelled, and take each " +
+  "row's status from what that row records. Exclude social plans, meals, travel, and " +
   "other personal or administrative bullets. Preserve formulas, identifiers, field names, and operands verbatim in " +
-  "descriptions rather than guessing translations for ambiguous domain terms. Return at most 12 action items and 6 " +
+  "descriptions rather than guessing translations for ambiguous domain terms. Return at most 30 action items and 6 " +
   "references for one content chunk, prioritizing concrete current commitments and material dependencies. Only assert what the document supports - " +
   "do not invent.";
 
-const STATEMENT_CURATION_SYSTEM_PROMPT = `You filter extracted statements for a searchable project knowledge base.
+export const STATEMENT_CURATION_SYSTEM_PROMPT = `You filter extracted statements for a searchable project knowledge base.
 
 Return exactly one decision for every supplied zero-based index, in the same order. Set keep=true only when the existing textDerived is self-contained, supported by textRaw, and useful for answering a future question about the project. Never rewrite, merge, reclassify, or repair an item; only decide whether the supplied extraction is safe and useful as written.
 
@@ -109,17 +119,19 @@ Use the supplied project context as the relevance boundary. A detailed claim is 
 
 Drop a statement when textRaw does not establish the actor, entity, certainty, scope, or status asserted by textDerived. Drop context-dependent statements that rely on the topic or on unresolved words such as "it", "this", "they", "the document", "the data", or "the points". Do not keep aspirations or estimates classified as accepted decisions.`;
 
-const ACTION_ITEM_CURATION_SYSTEM_PROMPT = `You filter extracted action items for a searchable project knowledge base.
+export const ACTION_ITEM_CURATION_SYSTEM_PROMPT = `You filter extracted action items for a searchable project knowledge base.
 
 Return exactly one decision for every supplied zero-based index, in the same order. Never rewrite, merge, split, change status, or replace the owner; only decide whether the supplied action is safe and useful as written.
 
-Set keep=true only when textRaw itself establishes: (1) the stated accountable owner, (2) the concrete deliverable or verifiable outcome in the description, and (3) an accepted assignment or commitment rather than a requirement, idea, hope, inference, or general direction. The description must stand alone and identify the relevant system, artifact, data, recipient, and purpose when needed.
+Set keep=true only when textRaw itself establishes: (1) the concrete deliverable or verifiable outcome in the description, and (2) that the work was accepted, assigned, or is being tracked - rather than a requirement, idea, hope, inference, or general direction. The description must stand alone and identify the relevant system, artifact, data, recipient, and purpose when needed.
+
+An owner is optional. Keep an item with no owner when textRaw records its status or assignment, as a task list, tracker row, or checklist entry does. When an owner IS given, textRaw must establish that person or named team; drop the item when it does not.
 
 Use the supplied project context as the relevance boundary and drop unrelated commitments.
 
-Drop owners such as "The group" or an inferred collective. Drop meeting scheduling, general monitoring, administrative summaries, requests merely to discuss or apply pressure, generic continuation of work, and requirements nobody explicitly accepted. Drop any item whose description is more specific than its textRaw evidence.`;
+Drop meeting scheduling, general monitoring, administrative summaries, requests merely to discuss or apply pressure, generic continuation of work, and requirements nobody explicitly accepted or tracks. Drop any item whose description or status is more specific than its textRaw evidence.`;
 
-const STATEMENT_GROUPING_SYSTEM_PROMPT =
+export const STATEMENT_GROUPING_SYSTEM_PROMPT =
   "You organize a document's statements into a small set of broad subjects (topics). Group statements that concern the " +
   "same subject - a system, component, feature, or decision - under one topic. A log or status dump is usually about a " +
   "single subject; consolidate aggressively and prefer few topics. For each group output a clean, broad name, its type " +
@@ -133,7 +145,7 @@ const REMOTE_DOCUMENT_EXTRACTION_CHUNK_TOKENS = 24000;
 // a reasoning model bills its reasoning against this budget, so it is set generously to avoid truncation. it is only a
 // ceiling - billing is for tokens actually used.
 const REMOTE_DOCUMENT_PIPELINE_MAX_COMPLETION_TOKENS = 64000;
-const CURATION_FILTER_BATCH_SIZE = 20;
+export const CURATION_FILTER_BATCH_SIZE = 20;
 const CURATION_MAX_COMPLETION_TOKENS = 8192;
 // Grouping output is compact and bounded by its input batch. A 64k ceiling lets small local models spiral into a full
 // reasoning-length generation after the client has already timed out, blocking every later request behind it.
@@ -1275,7 +1287,7 @@ export class OpenAIService {
     const itemsBlock = actionItems
       .map(
         (item, index) =>
-          `${index}. ${item.description} (owner: ${item.owner}) [status: ${item.status}] ` +
+          `${index}. ${item.description} (owner: ${item.owner ?? "unspecified"}) [status: ${item.status}] ` +
           `[candidate ids: ${item.candidateActionItemIds.length ? item.candidateActionItemIds.join(", ") : "none"}]`,
       )
       .join("\n");
@@ -1644,7 +1656,7 @@ export class OpenAIService {
                   additionalProperties: false,
                   properties: {
                     topicName: nullableString,
-                    owner: { type: "string" },
+                    owner: nullableString,
                     description: { type: "string" },
                     expectedBy: nullableString,
                     status: { type: "string", enum: enums.actionItemStatus },
