@@ -13,8 +13,9 @@ import { OpenAiTopicGroup } from "./types/openai-topic-group.type";
 import { GenerateActionItemGroupingOptions } from "./types/generate-action-item-grouping-options.type";
 import { OpenAiActionItemGroup } from "./types/openai-action-item-group.type";
 import { GenerateReferenceResolutionJudgmentOptions } from "./types/generate-reference-resolution-judgment-options.type";
-import { GenerateActionItemResolutionJudgmentOptions } from "./types/generate-action-item-resolution-judgment-options.type";
 import { GenerateActionItemResolutionJudgmentsOptions } from "./types/generate-action-item-resolution-judgments-options.type";
+import { ActionItemResolutionDecision } from "./types/action-item-resolution-decision.type";
+import { evidenceQuoteOccursIn } from "src/utils/evidence-quote.util";
 import { GenerateStatementCurationOptions } from "./types/generate-statement-curation-options.type";
 import { GenerateActionItemCurationOptions } from "./types/generate-action-item-curation-options.type";
 import { GenerateStatementGroupingOptions } from "./types/generate-statement-grouping-options.type";
@@ -138,6 +139,8 @@ const CURATION_MAX_COMPLETION_TOKENS = 8192;
 // reasoning-length generation after the client has already timed out, blocking every later request behind it.
 const RECONCILIATION_GROUPING_MAX_COMPLETION_TOKENS = 8192;
 const ACTION_ITEM_GROUPING_MAX_COMPLETION_TOKENS = 4096;
+// resolution decisions each carry a verbatim quote and a reason, so they need more room than grouping
+const ACTION_ITEM_RESOLUTION_MAX_COMPLETION_TOKENS = 8192;
 
 const STATEMENT_SUPERSESSION_SYSTEM_PROMPT =
   "You decide whether a newer project statement SUPERSEDES an earlier one - it explicitly replaces, overrides, or " +
@@ -165,20 +168,27 @@ const REFERENCE_RESOLUTION_SYSTEM_PROMPT =
   "match. Candidates are ordered by precedence and similarity. Return the first clear referent's candidateId, kind, " +
   "resolution, and confidence, or a null candidate when none qualifies.";
 
-const ACTION_ITEM_RESOLUTION_SYSTEM_PROMPT =
-  "You judge whether a piece of evidence resolves the status of a project action item. You are given the action item and " +
-  "one piece of evidence: a later meeting statement, or a code file summary. Set resolved true only when the evidence " +
-  "clearly concerns THIS action item and decisively bears on its status; otherwise resolved is false. When resolved, " +
-  "return the resulting status from the allowed set (e.g. the work is done, in progress, blocked, or was dropped). Never " +
-  "infer completion or abandonment from silence, absence, or a vague mention. Candidates are ordered by precedence " +
-  "and similarity. Return the first decisive candidate's id, kind, status, and confidence, or a null candidate.";
+const ACTION_ITEM_BATCH_RESOLUTION_SYSTEM_PROMPT = `You examine numbered action items, each with its own evidence candidates, and report only the candidates that decisively bear on whether that item's specific deliverable is COMPLETE.
 
-const ACTION_ITEM_BATCH_RESOLUTION_SYSTEM_PROMPT =
-  "For each numbered action item, decide whether one of its later-document or code evidence candidates decisively " +
-  "resolves that exact commitment. An item is resolved only when the evidence explicitly establishes that the same " +
-  "deliverable was completed, is in progress, is blocked, or was lapsed. Related work, a shared feature, owner, or " +
-  "recipient is not enough. Never infer a status from silence or a vague mention. Return one decision per input: select " +
-  "only an id and kind listed under that input, or null with the supplied item's extracted status unchanged.";
+Emit a decision for a candidate only when one of these is unambiguously true:
+- "supports": the candidate explicitly establishes that this exact deliverable was completed.
+- "contradicts": the candidate explicitly establishes it was not completed - still open, still in progress, blocked, abandoned, or reopened after completion.
+
+Emit nothing at all for a candidate when any of the following holds, however plausible completion seems:
+- it concerns related work, the same feature, the same system, the same owner, or the same recipient, but not this deliverable;
+- it shows the work planned, assigned, promised, or merely discussed;
+- completion is implied by silence, by the absence of complaint, or by a general status update;
+- you would have to assume, infer, or fill in a step to reach completion;
+- more than one reading of the candidate is defensible.
+
+Emitting nothing is the correct and expected outcome for most candidates. An item left unresolved is re-examined for free when new evidence arrives; a wrong "supports" silently corrupts the project's record. Report every decisive candidate you find, including ones that contradict each other - do not pick a side, and do not suppress a contradicting candidate because another one supports.
+
+Every decision must carry:
+- index: the number of the action item the candidate is listed under.
+- candidateId and candidateKind: exactly as listed under THAT item. Never an id from another item, never an id you were not given.
+- evidenceQuote: 12 to 300 characters copied CHARACTER-FOR-CHARACTER from that candidate's text. Do not translate it, correct spelling, expand abbreviations, or change punctuation. It is checked mechanically against the candidate text, and a quote that does not occur verbatim voids the decision.
+- reason: one sentence naming the deliverable and what the quote establishes about it.
+- confidence: between 0 and 1.`;
 
 const TOPIC_GROUPING_SYSTEM_PROMPT =
   "You organize a project's doc-topics into a very small set of broad, initiative-level canonical topics. You are given " +
@@ -787,95 +797,21 @@ export class OpenAIService {
     };
   }
 
-  async generateActionItemResolutionJudgment({
-    actionItem,
-    candidates,
-    statuses,
-    model = this.inferenceModelDefault as ChatModel,
-  }: GenerateActionItemResolutionJudgmentOptions): Promise<{
-    candidateId: string | null;
-    candidateKind: "document" | "code" | null;
-    status: string;
-    confidence: number;
-    usage: OpenAiTokenUsage;
-  }> {
-    const candidateBlock = candidates
-      .map((candidate, index) => `${index + 1}. [${candidate.kind}:${candidate.id}] ${candidate.text}`)
-      .join("\n");
-    const response = await this.openai.chat.completions.create({
-      model,
-      messages: [
-        { role: "system", content: ACTION_ITEM_RESOLUTION_SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `Action item:\n${actionItem}\n\nEvidence candidates, ordered by precedence and similarity:\n${candidateBlock}\n\nReturn the first candidate that decisively resolves the action item's status, or null.`,
-        },
-      ],
-      max_completion_tokens: 4096,
-      ...this.inferenceReasoningOptions,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "action_item_resolution_judgment",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              candidateId: { type: ["string", "null"] },
-              candidateKind: { type: ["string", "null"], enum: ["document", "code", null] },
-              status: { type: "string", enum: statuses },
-              confidence: { type: "number" },
-            },
-            required: ["candidateId", "candidateKind", "status", "confidence"],
-          },
-        },
-      },
-    });
-
-    const raw = response.choices[0]?.message?.content;
-
-    if (!raw) {
-      throw new Error("No action item resolution judgment generated from OpenAI");
-    }
-
-    const parsed = JSON.parse(raw) as {
-      candidateId: string | null;
-      candidateKind: "document" | "code" | null;
-      status: string;
-      confidence: number;
-    };
-    const selected = candidates.find(
-      (candidate) => candidate.id === parsed.candidateId && candidate.kind === parsed.candidateKind,
-    );
-
-    return {
-      candidateId: selected?.id ?? null,
-      candidateKind: selected?.kind ?? null,
-      status: parsed.status,
-      confidence: parsed.confidence,
-      usage: {
-        inputTokens: response.usage?.prompt_tokens ?? 0,
-        outputTokens: response.usage?.completion_tokens ?? 0,
-      },
-    };
-  }
-
+  /**
+   * Judges each action item's evidence candidates for decisive completion signals.
+   * @param options - the numbered action items with their rendered candidates
+   * @returns Validated decisions grouped per action item, plus how many were voided by the quote check.
+   */
   async generateActionItemResolutionJudgments({
     actionItems,
-    statuses,
     model = this.inferenceModelDefault as ChatModel,
   }: GenerateActionItemResolutionJudgmentsOptions): Promise<{
-    decisions: {
-      candidateId: string | null;
-      candidateKind: "document" | "code" | null;
-      status: string;
-      confidence: number;
-    }[];
+    decisionsByItem: ActionItemResolutionDecision[][];
+    quoteRejections: number;
     usage: OpenAiTokenUsage;
   }> {
     if (actionItems.length === 0) {
-      return { decisions: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      return { decisionsByItem: [], quoteRejections: 0, usage: { inputTokens: 0, outputTokens: 0 } };
     }
 
     const actionItemsBlock = actionItems
@@ -893,7 +829,7 @@ export class OpenAIService {
         { role: "system", content: ACTION_ITEM_BATCH_RESOLUTION_SYSTEM_PROMPT },
         { role: "user", content: `Action items:\n${actionItemsBlock}` },
       ],
-      max_completion_tokens: ACTION_ITEM_GROUPING_MAX_COMPLETION_TOKENS,
+      max_completion_tokens: ACTION_ITEM_RESOLUTION_MAX_COMPLETION_TOKENS,
       ...this.inferenceReasoningOptions,
       response_format: {
         type: "json_schema",
@@ -911,12 +847,22 @@ export class OpenAIService {
                   additionalProperties: false,
                   properties: {
                     index: { type: "integer" },
-                    candidateId: { type: ["string", "null"] },
-                    candidateKind: { type: ["string", "null"], enum: ["document", "code", null] },
-                    status: { type: "string", enum: statuses },
+                    candidateId: { type: "string" },
+                    candidateKind: { type: "string", enum: ["document", "code"] },
+                    verdict: { type: "string", enum: ["supports", "contradicts"] },
+                    evidenceQuote: { type: "string" },
+                    reason: { type: "string" },
                     confidence: { type: "number" },
                   },
-                  required: ["index", "candidateId", "candidateKind", "status", "confidence"],
+                  required: [
+                    "index",
+                    "candidateId",
+                    "candidateKind",
+                    "verdict",
+                    "evidenceQuote",
+                    "reason",
+                    "confidence",
+                  ],
                 },
               },
             },
@@ -934,42 +880,53 @@ export class OpenAIService {
     const parsed = JSON.parse(raw) as {
       decisions: {
         index: number;
-        candidateId: string | null;
-        candidateKind: "document" | "code" | null;
-        status: string;
+        candidateId: string;
+        candidateKind: "document" | "code";
+        verdict: "supports" | "contradicts";
+        evidenceQuote: string;
+        reason: string;
         confidence: number;
       }[];
     };
-    const decisions: {
-      candidateId: string | null;
-      candidateKind: "document" | "code" | null;
-      status: string;
-      confidence: number;
-    }[] = Array.from({ length: actionItems.length }, () => ({
-      candidateId: null,
-      candidateKind: null,
-      status: "open",
-      confidence: 0,
-    }));
+    const decisionsByItem: ActionItemResolutionDecision[][] = Array.from({ length: actionItems.length }, () => []);
+    let quoteRejections = 0;
 
     for (const decision of parsed.decisions) {
       if (!Number.isInteger(decision.index) || decision.index < 0 || decision.index >= actionItems.length) {
         continue;
       }
 
+      // a fabricated id, or a real id borrowed from another item in the same batch, is not a candidate for this item
       const selected = actionItems[decision.index].candidates.find(
         (candidate) => candidate.id === decision.candidateId && candidate.kind === decision.candidateKind,
       );
-      decisions[decision.index] = {
-        candidateId: selected?.id ?? null,
-        candidateKind: selected?.kind ?? null,
-        status: decision.status,
+
+      if (!selected) {
+        continue;
+      }
+
+      if (!evidenceQuoteOccursIn({ quote: decision.evidenceQuote, sources: [selected.text] })) {
+        quoteRejections++;
+        this.logger.warn(
+          `Voided an action-item resolution decision whose quote is not verbatim in ${selected.kind} ${selected.id}: "${decision.evidenceQuote.slice(0, 120)}"`,
+        );
+
+        continue;
+      }
+
+      decisionsByItem[decision.index].push({
+        candidateId: selected.id,
+        candidateKind: selected.kind,
+        verdict: decision.verdict,
+        evidenceQuote: decision.evidenceQuote,
+        reason: decision.reason,
         confidence: decision.confidence,
-      };
+      });
     }
 
     return {
-      decisions,
+      decisionsByItem,
+      quoteRejections,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,

@@ -24,8 +24,8 @@ export class ProjectFoldersController {
   }
 
   @Delete(":projectFolderId")
-  async remove(@Param("projectFolderId") projectFolderId: string) {
-    return this.projectFolderService.remove(projectFolderId);
+  async remove(@Param("projectId") projectId: string, @Param("projectFolderId") projectFolderId: string) {
+    return this.projectFolderService.projectFolderDelete({ projectId, projectFolderId });
   }
 
   @Post(":projectFolderId/import")

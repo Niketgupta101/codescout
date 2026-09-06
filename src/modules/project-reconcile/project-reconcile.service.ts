@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { createHash } from "crypto";
 import {
   Prisma,
   ProjectActionItemStatusSource,
@@ -17,7 +18,14 @@ import { OpenAIService } from "../openai/openai.service";
 import { ProjectCorrectionService } from "../project-correction/project-correction.service";
 import type { ProjectReconcileResult } from "./types/project-reconcile-result.type";
 import type { ProjectReconcileStatementState } from "./types/project-reconcile-statement-state.type";
+import type { ActionItemResolutionDecision } from "../openai/types/action-item-resolution-decision.type";
 import type { ActionItemResolutionEvidence } from "./types/action-item-resolution-evidence.type";
+import type { ProjectActionItemResolveResult } from "./types/project-action-item-resolve-result.type";
+import type { ProjectActionItemResolveProposal } from "./types/project-action-item-resolve-proposal.type";
+import {
+  RESOLUTION_JUDGMENT_VERSION,
+  actionItemResolutionDigest,
+} from "./utils/action-item-resolution-digest.util";
 
 // raised from 0.6 after a seed inspection showed the judge over-linking relatedness/strategy as supersession (F16)
 const SUPERSESSION_CONFIDENCE_THRESHOLD = 0.75;
@@ -36,6 +44,9 @@ type CandidateSupersessionEdge = {
 // resolution (references + action-item status) mirrors the supersession pattern: nearest candidates then an llm judgment
 const RESOLUTION_CONFIDENCE_THRESHOLD = 0.6;
 const RESOLUTION_CANDIDATE_LIMIT = 5;
+// measured over this corpus: 0.45 would have starved 41% of items of any evidence at all, 0.65 starves none.
+// it only trims the tail - the candidate limit does the real selecting
+const RESOLUTION_DOCUMENT_DISTANCE_THRESHOLD = 0.65;
 
 // member statements sampled per doc-topic for the grouping prompt and drop-routing embeddings (keeps prompts bounded)
 const TOPIC_MEMBER_STATEMENT_SAMPLE = 8;
@@ -49,7 +60,10 @@ const TOPIC_CANDIDATE_LIMIT = 3;
 const ACTION_ITEM_GROUPING_BATCH_SIZE = 20;
 const ACTION_ITEM_GROUPING_BATCH_TOKENS = 6000;
 const ACTION_ITEM_CANDIDATE_LIMIT = 3;
-const ACTION_ITEM_RESOLUTION_BATCH_SIZE = 10;
+// candidate text dominates a resolution prompt, so batches stay small enough to keep each judgment sharp
+const ACTION_ITEM_RESOLUTION_BATCH_SIZE = 5;
+const ACTION_ITEM_RESOLUTION_BATCH_TOKENS = 8000;
+const RESOLUTION_WRITE_CHUNK_SIZE = 200;
 
 @Injectable()
 export class ProjectReconcileService {
@@ -79,10 +93,18 @@ export class ProjectReconcileService {
     return { correctionsApplied, topicsCreated, topicsMatched, actionItemsCreated, actionItemsMatched };
   }
 
-  async resolveActionItemStatuses(projectId: string): Promise<{ actionItemsResolved: number }> {
+  /**
+   * Resolves canonical action-item statuses from decisive later-document evidence.
+   * @param projectId - the project whose action items to resolve
+   * @param options - force re-judges items whose evidence is unchanged; dryRun returns the proposals without writing
+   */
+  async resolveActionItemStatuses(
+    projectId: string,
+    options: { force?: boolean; dryRun?: boolean } = {},
+  ): Promise<ProjectActionItemResolveResult> {
     this.logger.log(`Resolving canonical action-item statuses for project ${projectId}`);
 
-    return this._resolveCanonicalActionItemStatus(projectId);
+    return this._resolveCanonicalActionItemStatus(projectId, options);
   }
 
   async threadStatements(projectId: string): Promise<{ statementsReconciled: number; supersessionsLinked: number }> {
@@ -1233,159 +1255,352 @@ export class ProjectReconcileService {
    * as new documents and commits arrive. Never lapses an item from silence - only a decisive judgment can.
    * @param projectId - the project whose action-item status to resolve
    */
-  async _resolveCanonicalActionItemStatus(projectId: string): Promise<{ actionItemsResolved: number }> {
+  async _resolveCanonicalActionItemStatus(
+    projectId: string,
+    options: { force?: boolean; dryRun?: boolean } = {},
+  ): Promise<ProjectActionItemResolveResult> {
     const items = await this.prisma.projectActionItem.findMany({
-      where: { projectId, stale: false, statusSource: { not: ProjectActionItemStatusSource.manual } },
+      where: {
+        projectId,
+        stale: false,
+        statusSource: { not: ProjectActionItemStatusSource.manual },
+        origin: { not: ProjectDataOrigin.human },
+      },
       select: {
         id: true,
         title: true,
         description: true,
+        status: true,
+        statusSource: true,
+        resolutionEvidenceDigest: true,
+        // a suppressed member is a human saying "this extraction was wrong", so it must not feed the
+        // aggregate or push itemTime forward
         documentActionItems: {
-          select: { status: true, projectDocument: { select: { id: true, occurredAt: true } } },
+          where: { suppressed: false },
+          select: { id: true, status: true, projectDocument: { select: { id: true, occurredAt: true } } },
         },
       },
     });
+    const resolvableItems = items.filter((item) => item.documentActionItems.length > 0);
+    const empty: ProjectActionItemResolveResult = {
+      actionItemsExamined: items.length,
+      actionItemsJudged: 0,
+      actionItemsSkipped: 0,
+      actionItemsResolved: 0,
+      actionItemsReverted: 0,
+      actionItemsConflicted: 0,
+      quoteRejections: 0,
+      proposals: [],
+    };
 
-    if (items.length === 0) {
-      return { actionItemsResolved: 0 };
+    if (resolvableItems.length === 0) {
+      return empty;
     }
 
-    this.logger.log(`Resolving status for ${items.length} canonical action items`);
+    this.logger.log(
+      `Resolving status for ${resolvableItems.length} canonical action items${options.dryRun ? " (dry run)" : ""}`,
+    );
 
-    const repositoryFileCount = await this.prisma.repositoryFile.count({ where: { projectId } });
-    const allowedStatuses = Object.values(ProjectDocumentActionItemStatus);
-    const resolvableItems = items.filter((item) => item.documentActionItems.length > 0);
     const actionItemTexts = resolvableItems.map((item) => `${item.title}\n${item.description}`);
     const { embeddings } = await this.openaiService.generateEmbeddings(actionItemTexts);
-    const evidenceByItem = await this._mapWithConcurrency(resolvableItems, 4, (item, itemIndex) => {
-      const itemTime = item.documentActionItems
+    const itemTimes = resolvableItems.map((item) =>
+      item.documentActionItems
         .map((member) => member.projectDocument.occurredAt)
-        .reduce((latest, current) => (current > latest ? current : latest));
+        .reduce((latest, current) => (current > latest ? current : latest)),
+    );
+    const evidenceByItem = await this._mapWithConcurrency(
+      resolvableItems,
+      this.openaiService.inferenceConcurrency,
+      (item, itemIndex) =>
+        this._findActionItemResolutionEvidence({
+          projectId,
+          itemTime: itemTimes[itemIndex],
+          embedding: embeddings[itemIndex],
+        }),
+    );
+    const digests = resolvableItems.map((item, itemIndex) =>
+      actionItemResolutionDigest({
+        title: item.title,
+        description: item.description,
+        itemTime: itemTimes[itemIndex],
+        memberIds: item.documentActionItems.map((member) => member.id),
+        candidateEntries: evidenceByItem[itemIndex].digestEntries,
+      }),
+    );
 
-      return this._findActionItemResolutionEvidence({
-        projectId,
-        itemTime,
-        embedding: embeddings[itemIndex],
-        includeCodeCandidates: repositoryFileCount > 0,
-      });
-    });
-    const judgments = new Array<{
-      candidateId: string | null;
-      candidateKind: "document" | "code" | null;
-      status: string;
-      confidence: number;
-    }>(resolvableItems.length);
+    // the digest gates the llm call only. an item whose evidence is unchanged keeps its previous verdict and is
+    // not written at all, which is what makes a repeat run cost nothing and preserves its provenance
+    const judgeableIndices = resolvableItems
+      .map((_, itemIndex) => itemIndex)
+      .filter(
+        (itemIndex) =>
+          options.force === true || digests[itemIndex] !== resolvableItems[itemIndex].resolutionEvidenceDigest,
+      )
+      .filter((itemIndex) => evidenceByItem[itemIndex].candidates.length > 0);
+    const skippedByDigest = resolvableItems.length - judgeableIndices.length;
 
-    for (let offset = 0; offset < resolvableItems.length; offset += ACTION_ITEM_RESOLUTION_BATCH_SIZE) {
-      const batchItems = resolvableItems.slice(offset, offset + ACTION_ITEM_RESOLUTION_BATCH_SIZE);
-      const batchEvidence = evidenceByItem.slice(offset, offset + ACTION_ITEM_RESOLUTION_BATCH_SIZE);
-      const { decisions } = await this.openaiService.generateActionItemResolutionJudgments({
-        actionItems: batchItems.map((item, index) => ({
-          actionItem: actionItemTexts[offset + index],
-          candidates: batchEvidence[index].candidates,
-        })),
-        statuses: allowedStatuses,
-      });
+    this.logger.log(
+      `${judgeableIndices.length} item(s) need judging, ${skippedByDigest} skipped on an unchanged evidence set`,
+    );
 
-      decisions.forEach((decision, index) => {
-        judgments[offset + index] = decision;
-      });
+    const decisionsByItem = new Map<number, ActionItemResolutionDecision[]>();
+    const batches = this._buildBoundedActionItemResolutionBatches(judgeableIndices, actionItemTexts, evidenceByItem);
+    const batchResults = await this._mapWithConcurrency(
+      batches,
+      this.openaiService.inferenceConcurrency,
+      async (batchIndices) => {
+        const result = await this.openaiService.generateActionItemResolutionJudgments({
+          actionItems: batchIndices.map((itemIndex) => ({
+            actionItem: actionItemTexts[itemIndex],
+            candidates: evidenceByItem[itemIndex].candidates,
+          })),
+        });
+
+        // carried as explicit pairs: positional slicing across concurrent batches is where one item's evidence
+        // silently becomes another's
+        return {
+          quoteRejections: result.quoteRejections,
+          pairs: batchIndices.map((itemIndex, positionInBatch) => ({
+            itemIndex,
+            decisions: result.decisionsByItem[positionInBatch] ?? [],
+          })),
+        };
+      },
+    );
+
+    let quoteRejections = 0;
+
+    for (const batchResult of batchResults) {
+      quoteRejections += batchResult.quoteRejections;
+
+      for (const pair of batchResult.pairs) {
+        decisionsByItem.set(pair.itemIndex, pair.decisions);
+      }
     }
 
+    const proposals: ProjectActionItemResolveProposal[] = [];
+    const updates: Prisma.PrismaPromise<unknown>[] = [];
     let actionItemsResolved = 0;
+    let actionItemsReverted = 0;
+    let actionItemsConflicted = 0;
 
-    for (let itemIndex = 0; itemIndex < resolvableItems.length; itemIndex++) {
+    for (const itemIndex of judgeableIndices) {
       const item = resolvableItems[itemIndex];
-      const memberStatuses = item.documentActionItems.map((member) => member.status);
-      let finalStatus: ProjectDocumentActionItemStatus = this._aggregateMemberStatus(memberStatuses);
+      const evidence = evidenceByItem[itemIndex];
+      const confident = (decisionsByItem.get(itemIndex) ?? []).filter(
+        (decision) => decision.confidence >= RESOLUTION_CONFIDENCE_THRESHOLD,
+      );
+      const supporting = confident.filter((decision) => decision.verdict === "supports");
+      const contradicting = confident.filter((decision) => decision.verdict === "contradicts");
+
+      let finalStatus: ProjectDocumentActionItemStatus = this._aggregateMemberStatus(
+        item.documentActionItems.map((member) => member.status),
+      );
       let statusSource: ProjectActionItemStatusSource = ProjectActionItemStatusSource.extracted;
       let resolvedByDocumentId: string | null = null;
-      let resolvedByRepositoryFileId: string | null = null;
-      const judgment = judgments[itemIndex];
-      const evidence = evidenceByItem[itemIndex];
+      let reason: string | null = null;
+      let resolutionEvidence: Prisma.InputJsonValue | null = null;
 
-      if (
-        judgment?.candidateId &&
-        judgment.confidence >= RESOLUTION_CONFIDENCE_THRESHOLD &&
-        (allowedStatuses as string[]).includes(judgment.status)
-      ) {
-        if (judgment.candidateKind === "document") {
-          const documentId = evidence.documentIdByCandidateId.get(judgment.candidateId);
-          if (documentId) {
-            finalStatus = judgment.status as ProjectDocumentActionItemStatus;
-            statusSource = ProjectActionItemStatusSource.document;
-            resolvedByDocumentId = documentId;
-          }
-        } else if (judgment.candidateKind === "code" && judgment.status === ProjectDocumentActionItemStatus.done) {
+      // models over-answer heavily when evidence conflicts, so refusing is a branch rather than a prompt rule:
+      // one candidate saying it shipped and another saying it is still open is not a resolution
+      if (supporting.length > 0 && contradicting.length > 0) {
+        actionItemsConflicted++;
+        this.logger.warn(
+          `Abstaining on action item ${item.id} (${item.title}): ${supporting.length} supporting and ${contradicting.length} contradicting candidate(s)`,
+        );
+      } else if (supporting.length > 0) {
+        const [best] = [...supporting].sort((first, second) => second.confidence - first.confidence);
+        const documentId = evidence.documentIdByCandidateId.get(best.candidateId);
+
+        if (documentId) {
+          // auto-resolution may only ever conclude done; every other status stays with the extraction aggregate
           finalStatus = ProjectDocumentActionItemStatus.done;
-          statusSource = ProjectActionItemStatusSource.code;
-          resolvedByRepositoryFileId = judgment.candidateId;
+          statusSource = ProjectActionItemStatusSource.document;
+          resolvedByDocumentId = documentId;
+          reason = best.reason;
+          resolutionEvidence = {
+            kind: best.candidateKind,
+            candidateId: best.candidateId,
+            documentId,
+            quote: best.evidenceQuote,
+            confidence: best.confidence,
+            judgmentVersion: RESOLUTION_JUDGMENT_VERSION,
+          };
+          actionItemsResolved++;
         }
       }
 
-      await this.prisma.projectActionItem.update({
-        where: { id: item.id },
-        data: {
-          status: finalStatus,
-          statusSource,
-          resolvedByDocumentId,
-          resolvedByRepositoryFileId,
-          resolvedBySymbolId: null,
-          resolvedAt: statusSource === ProjectActionItemStatusSource.extracted ? null : new Date(),
-        },
+      // keeping a done whose supporting evidence no longer exists is a worse lie than reverting to what
+      // extraction actually observed
+      if (
+        statusSource === ProjectActionItemStatusSource.extracted &&
+        item.statusSource !== ProjectActionItemStatusSource.extracted
+      ) {
+        actionItemsReverted++;
+        this.logger.warn(
+          `Reverting action item ${item.id} (${item.title}) from ${item.statusSource}/${item.status} to the extracted aggregate: its evidence no longer resolves it`,
+        );
+      }
+
+      proposals.push({
+        actionItemId: item.id,
+        title: item.title,
+        previousStatus: item.status,
+        previousStatusSource: item.statusSource,
+        status: finalStatus,
+        statusSource,
+        resolvedByDocumentId,
+        reason,
+        evidenceQuote: supporting[0]?.evidenceQuote ?? null,
+        conflicted: supporting.length > 0 && contradicting.length > 0,
+        candidateCount: evidence.candidates.length,
       });
 
-      if (statusSource !== ProjectActionItemStatusSource.extracted) {
-        actionItemsResolved++;
+      updates.push(
+        this.prisma.projectActionItem.update({
+          where: { id: item.id },
+          data: {
+            status: finalStatus,
+            statusSource,
+            reason,
+            resolvedByDocumentId,
+            resolvedByRepositoryFileId: null,
+            resolvedByRepositoryFilePath: null,
+            resolvedBySymbolId: null,
+            resolvedAt: statusSource === ProjectActionItemStatusSource.extracted ? null : new Date(),
+            resolutionEvidence: resolutionEvidence ?? Prisma.DbNull,
+            resolutionEvidenceDigest: digests[itemIndex],
+            resolutionAttemptedAt: new Date(),
+          },
+        }),
+      );
+    }
+
+    // the digest gates the llm call, never the aggregate. a member flipping open -> blocked changes what
+    // extraction observed while leaving the evidence set byte-identical, so skipped items still get their
+    // baseline refreshed - but only when nothing has resolved them, so provenance is never clobbered
+    const judgeableIndexSet = new Set(judgeableIndices);
+
+    for (let itemIndex = 0; itemIndex < resolvableItems.length; itemIndex++) {
+      const item = resolvableItems[itemIndex];
+
+      if (judgeableIndexSet.has(itemIndex) || item.statusSource !== ProjectActionItemStatusSource.extracted) {
+        continue;
+      }
+
+      const aggregate = this._aggregateMemberStatus(item.documentActionItems.map((member) => member.status));
+
+      if (aggregate !== item.status) {
+        updates.push(
+          this.prisma.projectActionItem.update({ where: { id: item.id }, data: { status: aggregate } }),
+        );
       }
     }
 
-    return { actionItemsResolved };
+    if (options.dryRun) {
+      this.logger.log(`Dry run: ${updates.length} update(s) withheld`);
+    } else {
+      for (let offset = 0; offset < updates.length; offset += RESOLUTION_WRITE_CHUNK_SIZE) {
+        await this.prisma.$transaction(updates.slice(offset, offset + RESOLUTION_WRITE_CHUNK_SIZE));
+      }
+    }
+
+    const result: ProjectActionItemResolveResult = {
+      actionItemsExamined: items.length,
+      actionItemsJudged: judgeableIndices.length,
+      actionItemsSkipped: skippedByDigest,
+      actionItemsResolved,
+      actionItemsReverted,
+      actionItemsConflicted,
+      quoteRejections,
+      proposals,
+    };
+
+    this.logger.log(
+      `Action-item resolution complete for project ${projectId}: ${JSON.stringify({ ...result, proposals: proposals.length })}`,
+    );
+
+    return result;
   }
 
+  // the resolution batcher is token-bounded as well as count-bounded because candidate text dominates the prompt
+  _buildBoundedActionItemResolutionBatches(
+    judgeableIndices: number[],
+    actionItemTexts: string[],
+    evidenceByItem: ActionItemResolutionEvidence[],
+  ): number[][] {
+    const batches: number[][] = [];
+    let current: number[] = [];
+    let currentTokens = 0;
+
+    for (const itemIndex of judgeableIndices) {
+      const itemTokens = encode(
+        [actionItemTexts[itemIndex], ...evidenceByItem[itemIndex].candidates.map((candidate) => candidate.text)].join(
+          "\n",
+        ),
+      ).length;
+      const exceedsCount = current.length >= ACTION_ITEM_RESOLUTION_BATCH_SIZE;
+      const exceedsTokens = current.length > 0 && currentTokens + itemTokens > ACTION_ITEM_RESOLUTION_BATCH_TOKENS;
+
+      if (exceedsCount || exceedsTokens) {
+        batches.push(current);
+        current = [];
+        currentTokens = 0;
+      }
+
+      current.push(itemIndex);
+      currentTokens += itemTokens;
+    }
+
+    if (current.length > 0) {
+      batches.push(current);
+    }
+
+    return batches;
+  }
+
+  // code evidence is deliberately absent: measured over this corpus, no code candidate ever came nearer than a good
+  // document match and no distance separated a relevant file from an irrelevant one, so it only ever added a weak
+  // candidate for the judge to over-read. revive it only once code is retrievable (symbol-level embeddings, or
+  // summaries written with the action items in view), and re-measure that separation before trusting it
   async _findActionItemResolutionEvidence({
     projectId,
     itemTime,
     embedding,
-    includeCodeCandidates,
   }: {
     projectId: string;
     itemTime: Date;
     embedding: number[];
-    includeCodeCandidates: boolean;
   }): Promise<ActionItemResolutionEvidence> {
     const laterStatements = await this.prisma.$queryRaw<
-      { id: string; textDerived: string; projectDocumentId: string }[]
+      { id: string; textDerived: string; textRaw: string | null; projectDocumentId: string }[]
     >`
-      SELECT s.id, s."textDerived", s."projectDocumentId"
+      SELECT s.id, s."textDerived", s."textRaw", s."projectDocumentId"
       FROM "ProjectDocumentStatement" s
       JOIN "ProjectDocument" d ON d.id = s."projectDocumentId"
       WHERE s."projectId" = ${projectId}::uuid
         AND s."textDerivedEmbedding" IS NOT NULL
         AND s."suppressed" = false
         AND d."occurredAt" > ${itemTime}
+        AND (s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) <= ${RESOLUTION_DOCUMENT_DISTANCE_THRESHOLD}
       ORDER BY s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec
       LIMIT ${RESOLUTION_CANDIDATE_LIMIT}
     `;
-    const fileCandidates = includeCodeCandidates
-      ? await this.prisma.$queryRaw<{ id: string; summary: string | null }[]>`
-          SELECT id, summary
-          FROM "RepositoryFile"
-          WHERE "projectId" = ${projectId}::uuid
-            AND "summaryEmbedding" IS NOT NULL
-          ORDER BY "summaryEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec
-          LIMIT ${RESOLUTION_CANDIDATE_LIMIT}
-        `
-      : [];
+
+    const candidates = laterStatements.map((candidate) => ({
+      id: candidate.id,
+      // the german source is shown alongside the english derivation so a quote may be taken verbatim from either
+      text: candidate.textRaw ? `${candidate.textDerived}\n(source) ${candidate.textRaw}` : candidate.textDerived,
+      kind: "document" as const,
+    }));
 
     return {
-      candidates: [
-        ...laterStatements.map((candidate) => ({ id: candidate.id, text: candidate.textDerived, kind: "document" as const })),
-        ...fileCandidates
-          .filter((candidate): candidate is { id: string; summary: string } => Boolean(candidate.summary))
-          .map((candidate) => ({ id: candidate.id, text: candidate.summary, kind: "code" as const })),
-      ],
+      candidates,
       documentIdByCandidateId: new Map(laterStatements.map((candidate) => [candidate.id, candidate.projectDocumentId])),
+      digestEntries: candidates.map(
+        (candidate) =>
+          `${candidate.kind}:${candidate.id}:${createHash("sha256").update(candidate.text).digest("hex")}`,
+      ),
     };
   }
 

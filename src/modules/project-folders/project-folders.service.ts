@@ -87,9 +87,17 @@ export class ProjectFolderService implements OnModuleInit {
     return projectFolder;
   }
 
-  async remove(projectFolderId: string) {
-    const projectFolder = await this.findOne(projectFolderId); // ensure resource exists
-    await this.prisma.projectFolder.delete({ where: { id: projectFolderId } });
+  /** Removes a folder link. Documents imported through it are unlinked, not deleted. */
+  async projectFolderDelete(deleteInput: { projectId: string; projectFolderId: string }) {
+    const projectFolder = await this.prisma.projectFolder.findFirst({
+      where: { id: deleteInput.projectFolderId, projectId: deleteInput.projectId },
+    });
+
+    if (!projectFolder) {
+      throw LocaleException.notFound();
+    }
+
+    await this.prisma.projectFolder.delete({ where: { id: projectFolder.id } });
 
     return projectFolder;
   }

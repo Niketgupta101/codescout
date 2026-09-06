@@ -97,6 +97,9 @@ export class ProjectBrainService {
         resolvedAt: true,
         updatedAt: true,
 
+        // the cited quote and confidence behind an auto-resolution, so a verdict can be checked without the db
+        resolutionEvidence: true,
+
         // decisive signal that set the status, resolved to a human-readable document
         resolvedByDocument: { select: { name: true, occurredAt: true, type: true } },
 

@@ -70,6 +70,91 @@ export class ProjectFolderMcp {
   }
 
   @Tool({
+    name: "projectActionItemResolve",
+    description:
+      "Resolves canonical action-item statuses from the project's documents. An item is marked done only when a " +
+      "later statement decisively says that exact deliverable was completed, cited with a verbatim quote that is " +
+      "checked mechanically; anything ambiguous, and anything with both supporting and contradicting evidence, is " +
+      "left as extraction found it. Never sets any status other than done. " +
+      "Run dryRun first to review what would change without writing. Safe to re-run: an item whose evidence has " +
+      "not changed since the last run is skipped without an LLM call, so repeat runs are nearly free.",
+    parameters: z.object({
+      projectId: z.uuid().describe("Project UUID whose action items should be resolved."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("Return the proposed changes without writing them. Use this before the first real run."),
+      force: z
+        .boolean()
+        .optional()
+        .describe("Re-judge every item even when its evidence is unchanged. Use after changing resolution logic."),
+    }),
+  })
+  async projectActionItemResolve(
+    projectActionItemResolveInput: { projectId: string; dryRun?: boolean; force?: boolean },
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectActionItemResolveInput.projectId,
+      actor,
+    });
+
+    this.logger.log(
+      `MCP projectActionItemResolve: project=${project.id} dryRun=${projectActionItemResolveInput.dryRun ?? false}`,
+    );
+
+    const result = await this.projectReconcileService.resolveActionItemStatuses(project.id, {
+      dryRun: projectActionItemResolveInput.dryRun,
+      force: projectActionItemResolveInput.force,
+    });
+
+    // only the items this run actually changed are worth returning; unchanged ones would bury them
+    const changed = result.proposals.filter(
+      (proposal) => proposal.status !== proposal.previousStatus || proposal.statusSource !== proposal.previousStatusSource,
+    );
+
+    return { projectId: project.id, ...result, proposals: changed };
+  }
+
+  @Tool({
+    name: "projectFolderDelete",
+    description:
+      "Removes a Google Drive folder link from a project. Documents already imported through the link are kept - " +
+      "they are unlinked, not deleted, so their extracted statements, topics and action items survive, and a later " +
+      "import that covers the same files reattaches them without re-extracting. " +
+      "Use this when a link is superseded, for example after linking a parent folder that already covers it.",
+    parameters: z.object({
+      projectId: z.uuid().describe("Project UUID owning the folder link."),
+      projectFolderId: z.uuid().describe("Folder link UUID to remove."),
+    }),
+  })
+  async projectFolderDelete(
+    projectFolderDeleteInput: { projectId: string; projectFolderId: string },
+    _context: Context,
+    request?: McpToolRequest,
+  ) {
+    const actor = await this.mcpActorService.actorResolve(request);
+
+    const project = await this.mcpActorService.projectFindOneForAccessCheck({
+      projectId: projectFolderDeleteInput.projectId,
+      actor,
+    });
+
+    const projectFolder = await this.projectFolderService.projectFolderDelete({
+      projectId: project.id,
+      projectFolderId: projectFolderDeleteInput.projectFolderId,
+    });
+
+    return {
+      projectFolderId: projectFolder.id,
+      message: `Folder link "${projectFolder.name}" removed. Documents imported through it were kept and unlinked.`,
+    };
+  }
+
+  @Tool({
     name: "projectFolderImport",
     description:
       "Starts importing files from a linked Google Drive folder into the project's knowledge base. " +
