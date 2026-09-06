@@ -556,6 +556,15 @@ model ProjectActionItem {
 
   summaryEmbedding Unsupported("halfvec(3072)")?
 
+  // fingerprint of the evidence set and judgment version this item was last judged against; an unchanged
+  // digest means the llm judgment is skipped and the prior verdict stands
+  resolutionEvidenceDigest     String?
+  resolutionAttemptedAt        DateTime?
+  // stable anchor: RepositoryFile rows are recreated with new ids on re-index, fullPath is not
+  resolvedByRepositoryFilePath String?
+  // audit blob for a human to check a verdict against: cited candidate, verbatim quote, confidence, version
+  resolutionEvidence           Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
