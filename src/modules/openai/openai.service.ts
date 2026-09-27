@@ -73,7 +73,7 @@ Output rules:
 - actor: who made or is responsible for the statement. Prefer their role or title (e.g. "industrial designer", "project manager") when the document establishes roles; otherwise their name; null when the document does not attribute it. In meeting transcripts, attribute each statement to its speaker.
 - Write every field in English; if the document is in another language, translate. textRaw is the one exception - keep it as a verbatim span in the document's original language.
 - Every topicName and optionTopicName must match a name in the topics list.
-- Infer each statement's event date as an ISO date (YYYY-MM-DD) from context; use null when it has none.
+- Infer each statement's event date as an ISO date (YYYY-MM-DD) from context; use null when it has none. When a numeric date is ambiguous (e.g. 03/07/2026 or 03072026), read it day-first (DD/MM/YYYY) unless the content clearly indicates otherwise.
 - Only assert what the document supports - do not invent.`;
 
 export const DOCUMENT_REFERENCES_SYSTEM_PROMPT =
