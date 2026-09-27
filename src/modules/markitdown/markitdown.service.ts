@@ -6,10 +6,15 @@ import { MARKITDOWN_SUPPORTED_EXTENSIONS, MARKITDOWN_SUPPORTED_MIME_TYPES } from
 import type { MarkitdownResult } from "./types/markitdown-result.type";
 
 const WORKBOOK_EXTENSION = ".xlsx";
-// a spreadsheet date cell stores an offset, not an ordering, and a default workbook renders 1 June as "6/1/26".
-// date inference is told to read an ambiguous numeric date day-first, which turns that into 6 January, so the
-// ordering the cell actually carries is formatted iso here rather than left for a prompt to guess
 const WORKBOOK_DATE_FORMAT = "yyyy-mm-dd";
+
+// xlsx exports its format library untyped, so it is narrowed once here to keep the conversion path typed
+type WorkbookNumberFormatter = {
+  format: (format: string, value: number) => string;
+  is_date: (format: string) => boolean;
+};
+
+const workbookNumberFormatter = XLSX.SSF as WorkbookNumberFormatter;
 
 @Injectable()
 export class MarkitdownService {
@@ -56,7 +61,9 @@ export class MarkitdownService {
   // survives - but reads the cells as dates first so their ordering is not lost to the rendered locale
   async _convertWorkbook(convertWorkbookInput: { buffer: Buffer; filename: string }): Promise<MarkitdownResult> {
     const { buffer, filename } = convertWorkbookInput;
-    const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true, dateNF: WORKBOOK_DATE_FORMAT });
+    // read serials rather than dates: cellDates rounds a serial to a moment ten seconds shy of midnight, which puts
+    // the calendar day one behind in every timezone, and cellNF is what exposes each cell's own format string
+    const workbook = XLSX.read(buffer, { type: "buffer", cellNF: true });
     const sections: string[] = [];
 
     for (const sheetName of workbook.SheetNames) {
@@ -65,6 +72,25 @@ export class MarkitdownService {
       // an empty sheet has no range, and markitdown skips those rather than emitting a bare heading
       if (!sheet["!ref"]) {
         continue;
+      }
+
+      // xlsx types a worksheet's cell lookup as any, so it is read through a typed view of the same object
+      const cellsByAddress: Record<string, XLSX.CellObject | undefined> = sheet;
+
+      for (const address of Object.keys(sheet)) {
+        const cell = cellsByAddress[address];
+
+        if (address.startsWith("!") || !cell) {
+          continue;
+        }
+
+        const cellFormat = typeof cell.z === "string" ? cell.z : null;
+
+        // a date cell carries an unambiguous serial plus a display format that may render it either way round, and
+        // sheet_to_html prints the display text - so the text is replaced with iso rather than left to be guessed
+        if (cell.t === "n" && typeof cell.v === "number" && cellFormat && workbookNumberFormatter.is_date(cellFormat)) {
+          cell.w = workbookNumberFormatter.format(WORKBOOK_DATE_FORMAT, cell.v);
+        }
       }
 
       const sheetHtml = XLSX.utils.sheet_to_html(sheet);
