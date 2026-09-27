@@ -8,7 +8,16 @@ export const SUMMARY_INPUT_PER_MILLION = 0.15;
 export const SUMMARY_OUTPUT_PER_MILLION = 0.6;
 export const EMBEDDING_INPUT_PER_MILLION = 0.13;
 
-export const PRICING_QUOTED_AT = "2026-04-25";
+// the document pipeline's inference model, priced at its short-context tier: every call sits far inside that tier
+// because extraction chunks are capped at 24k input tokens. long context is 0.40/1.80 if that ever changes.
+// a reasoning model bills its reasoning as output, so output dominates - one measured extraction run spent 997k input
+// tokens (0.20 USD) and about 0.80 USD on output, so pricing input alone understates a run roughly fivefold
+export const INFERENCE_MODEL = "gpt-5.6-luna";
+export const INFERENCE_INPUT_PER_MILLION = 0.2;
+export const INFERENCE_CACHED_INPUT_PER_MILLION = 0.02;
+export const INFERENCE_OUTPUT_PER_MILLION = 1.2;
+
+export const PRICING_QUOTED_AT = "2026-09-27";
 
 // expected output tokens for our "under 300 words" summary prompt
 // observed range is 350–500 with gpt-4o-mini, taking the high end as a conservative estimate

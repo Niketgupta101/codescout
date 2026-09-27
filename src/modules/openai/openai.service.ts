@@ -1,6 +1,18 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Prisma } from "@prisma/client";
 import OpenAI from "openai";
+import {
+  EMBEDDING_INPUT_PER_MILLION,
+  INFERENCE_CACHED_INPUT_PER_MILLION,
+  INFERENCE_INPUT_PER_MILLION,
+  INFERENCE_MODEL,
+  INFERENCE_OUTPUT_PER_MILLION,
+  PRICING_QUOTED_AT,
+  tokensToUsd,
+} from "src/utils/openai-pricing.util";
+import { OpenAiUsageTotals } from "./types/openai-usage-totals.type";
+import { OpenAiWireUsage } from "./types/openai-wire-usage.type";
 import { GenerateEmbeddingOptions } from "./types/generate-embedding-options.type";
 import { GenerateSummaryOptions } from "./types/generate-file-summary-options.type";
 import { GenerateDocumentClassificationOptions } from "./types/generate-document-classification-options.type";
@@ -149,12 +161,20 @@ const REMOTE_DOCUMENT_EXTRACTION_CHUNK_TOKENS = 24000;
 // a reasoning model bills its reasoning against this budget, so it is set generously to avoid truncation. it is only a
 // ceiling - billing is for tokens actually used.
 const REMOTE_DOCUMENT_PIPELINE_MAX_COMPLETION_TOKENS = 64000;
+
+// at low, two runs over byte-identical tracker content disagreed wildly - one returned 56 action items carrying all 35
+// completed rows, the other 17 with none of them - and a dropped completed row makes the record claim finished work is
+// still outstanding. a long status table needs enough reasoning to walk every row rather than summarize the table
+const REMOTE_INFERENCE_REASONING_EFFORT = "medium";
 export const CURATION_FILTER_BATCH_SIZE = 20;
 const CURATION_MAX_COMPLETION_TOKENS = 8192;
 // Grouping output is compact and bounded by its input batch. A 64k ceiling lets small local models spiral into a full
 // reasoning-length generation after the client has already timed out, blocking every later request behind it.
 const RECONCILIATION_GROUPING_MAX_COMPLETION_TOKENS = 8192;
-const ACTION_ITEM_GROUPING_MAX_COMPLETION_TOKENS = 4096;
+// a reasoning model bills its reasoning against this cap before emitting any json, and an action-item batch judges 20
+// items against every candidate anchor - so the room left for the grouping itself has to survive that. canonicalization
+// runs automatically after each import, which is the worst place to discover a truncated structured response
+const ACTION_ITEM_GROUPING_MAX_COMPLETION_TOKENS = 16384;
 // resolution decisions each carry a verbatim quote and a reason, so they need more room than grouping
 const ACTION_ITEM_RESOLUTION_MAX_COMPLETION_TOKENS = 8192;
 
@@ -210,9 +230,10 @@ const TOPIC_GROUPING_SYSTEM_PROMPT =
   "You organize a project's doc-topics into a very small set of broad, initiative-level canonical topics. You are given " +
   "the project's existing canonical topics (id, name, summary) and new doc-topic names, each with a few statements. " +
   "Place every input name in exactly one group: if it belongs to an existing canonical topic, fold it in by setting " +
-  "matchTopicId to an id listed in that input's candidate ids. Never match an input to an existing id outside its " +
-  "candidate list. Otherwise group it with related new names into a new topic (matchTopicId null) with " +
-  "a clean, broad name, its type from the allowed set, and a one- or two-sentence summary. Consolidate aggressively: " +
+  "matchTopicId to that topic's id, which must be one of the listed existing ids. Otherwise group it with related new " +
+  "names into a new topic (matchTopicId null) with a clean, broad name and its type from the allowed set. Always write " +
+  "summary as one or two sentences describing the whole resulting topic, covering the folded-in members as well as what " +
+  "an existing topic already described - on a fold-in it replaces that topic's summary. Consolidate aggressively: " +
   "fold related technical subjects, configurations, tests, diagnostics, and statuses into the one initiative they " +
   "serve, and absorb isolated details into the broader theme rather than giving them their own topic. Prefer folding " +
   "into an existing topic over creating a near-duplicate, and only open a new topic for a genuinely independent " +
@@ -239,7 +260,15 @@ export class OpenAIService {
   readonly inferenceModelDefault: string;
   readonly embeddingModelDefault: string;
   readonly inferenceConcurrency: number;
-  readonly inferenceReasoningOptions: { reasoning_effort?: "low" };
+  readonly inferenceReasoningOptions: { reasoning_effort?: typeof REMOTE_INFERENCE_REASONING_EFFORT };
+  // process-wide running totals; callers diff a snapshot rather than reading these directly
+  readonly usageTotals: OpenAiUsageTotals = {
+    calls: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    embeddingTokens: 0,
+  };
   readonly documentExtractionChunkTokens: number;
   readonly documentPipelineMaxCompletionTokens: number;
 
@@ -265,7 +294,9 @@ export class OpenAIService {
     this.inferenceConcurrency = configuredConcurrency ?? (isCustomInferenceEndpoint ? 1 : 4);
     // MTPLX/Qwen custom endpoints default to non-thinking mode when this field is omitted. Sending even "low" enables
     // thinking and can make a structured extraction run until its entire completion budget is exhausted.
-    this.inferenceReasoningOptions = isCustomInferenceEndpoint ? {} : { reasoning_effort: "low" };
+    this.inferenceReasoningOptions = isCustomInferenceEndpoint
+      ? {}
+      : { reasoning_effort: REMOTE_INFERENCE_REASONING_EFFORT };
     const configuredTimeout = this.configService.get<number>("OPENAI_INFERENCE_TIMEOUT_MS");
     this.documentExtractionChunkTokens =
       this.configService.get<number>("OPENAI_DOCUMENT_EXTRACTION_CHUNK_TOKENS") ??
@@ -277,6 +308,7 @@ export class OpenAIService {
     this.openai = new OpenAI({
       apiKey,
       baseURL,
+      fetch: this._usageRecordingFetch(),
       // A local model can legitimately need longer than the SDK's ten-minute default. Do not retry a timed-out local
       // generation: the server may still be finishing it, and a retry only adds another expensive queued request.
       ...(isCustomInferenceEndpoint ? { timeout: configuredTimeout ?? 1_800_000, maxRetries: 0 } : {}),
@@ -286,7 +318,99 @@ export class OpenAIService {
     this.embeddingOpenAI = new OpenAI({
       apiKey: optionalConfigString("OPENAI_EMBEDDING_API_KEY") ?? apiKey,
       baseURL: embeddingBaseURL,
+      fetch: this._usageRecordingFetch(),
     });
+  }
+
+  /**
+   * Wraps fetch so every response's usage block is counted before the SDK sees it.
+   * Usage is produced at more than a dozen call sites with no shared helper, so it is recorded at the transport
+   * boundary instead - the one place that cannot be forgotten when a call site is added. Counting is awaited so a
+   * snapshot taken right after an awaited call already includes it, and totals are process-wide: concurrent runs in
+   * one process share them, which is why callers diff a snapshot rather than reading the totals directly.
+   */
+  _usageRecordingFetch(): typeof fetch {
+    return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const response = await fetch(input, init);
+
+      if (!response.ok) {
+        return response;
+      }
+
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      try {
+        // read from a clone so the sdk still receives an unconsumed body
+        const body: unknown = await response.clone().json();
+        this._recordWireUsage({ body, isEmbedding: url.includes("/embeddings") });
+      } catch {
+        // a streamed or non-json body carries no usage block, and losing a count must never fail the request
+      }
+
+      return response;
+    };
+  }
+
+  _recordWireUsage(recordWireUsageInput: { body: unknown; isEmbedding: boolean }): void {
+    const { body, isEmbedding } = recordWireUsageInput;
+
+    if (typeof body !== "object" || body === null || !("usage" in body)) {
+      return;
+    }
+
+    const usage = (body as { usage: OpenAiWireUsage | null }).usage;
+
+    if (!usage) {
+      return;
+    }
+
+    this.usageTotals.calls += 1;
+
+    // an embedding bills on its own far cheaper rate, so it is counted apart from inference input
+    if (isEmbedding) {
+      this.usageTotals.embeddingTokens += usage.prompt_tokens ?? 0;
+
+      return;
+    }
+
+    this.usageTotals.inputTokens += usage.prompt_tokens ?? 0;
+    this.usageTotals.cachedInputTokens += usage.prompt_tokens_details?.cached_tokens ?? 0;
+    this.usageTotals.outputTokens += usage.completion_tokens ?? 0;
+  }
+
+  usageSnapshot(): OpenAiUsageTotals {
+    return { ...this.usageTotals };
+  }
+
+  /**
+   * Usage accumulated since a snapshot, with the dollar figure a run can log.
+   * @param snapshot - totals captured with usageSnapshot before the work started
+   * @returns The delta plus a one-line summary.
+   */
+  usageSince(snapshot: OpenAiUsageTotals): { usage: OpenAiUsageTotals; usd: number; summary: string } {
+    const usage: OpenAiUsageTotals = {
+      calls: this.usageTotals.calls - snapshot.calls,
+      inputTokens: this.usageTotals.inputTokens - snapshot.inputTokens,
+      cachedInputTokens: this.usageTotals.cachedInputTokens - snapshot.cachedInputTokens,
+      outputTokens: this.usageTotals.outputTokens - snapshot.outputTokens,
+      embeddingTokens: this.usageTotals.embeddingTokens - snapshot.embeddingTokens,
+    };
+
+    // prompt_tokens already includes the cached ones, so the uncached remainder is what bills at the full input rate
+    const uncachedInputTokens = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+    const usd = new Prisma.Decimal(tokensToUsd(uncachedInputTokens, INFERENCE_INPUT_PER_MILLION))
+      .add(tokensToUsd(usage.cachedInputTokens, INFERENCE_CACHED_INPUT_PER_MILLION))
+      .add(tokensToUsd(usage.outputTokens, INFERENCE_OUTPUT_PER_MILLION))
+      .add(tokensToUsd(usage.embeddingTokens, EMBEDDING_INPUT_PER_MILLION))
+      .toNumber();
+
+    const summary =
+      `${usage.calls} call(s), ${usage.inputTokens.toLocaleString()} input ` +
+      `(${usage.cachedInputTokens.toLocaleString()} cached) + ${usage.outputTokens.toLocaleString()} output ` +
+      `+ ${usage.embeddingTokens.toLocaleString()} embedding tokens, $${usd.toFixed(4)} at ${INFERENCE_MODEL} ` +
+      `rates quoted ${PRICING_QUOTED_AT}`;
+
+    return { usage, usd, summary };
   }
 
   async generateEmbedding({
@@ -1208,7 +1332,7 @@ export class OpenAIService {
     const projectDocumentTopicsPromptSection = projectDocumentTopics
       .map(
         (topic) =>
-          `- ${topic.name} [candidate ids: ${topic.candidateTopicIds?.length ? topic.candidateTopicIds.join(", ") : "none"}]` +
+          `- ${topic.name}` +
           (topic.statements.length
             ? `\n${topic.statements.map((statement) => `    ${statement}`).join("\n")}`
             : ""),

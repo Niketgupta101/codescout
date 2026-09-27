@@ -436,14 +436,30 @@ export class ProjectBrainService {
       throw new Error(`Action item ${actionItemId} not found in project ${projectId}`);
     }
 
+    // the resolved* fields are resolution provenance, not a record of who last touched the status: they answer what
+    // established this item as complete. so only done stamps them, and moving off done clears the whole set - including
+    // the evidence the reconciler attached, which would otherwise keep citing a document as proof of a completion
+    // that has just been retracted
+    const resolution =
+      status === ProjectDocumentActionItemStatus.done
+        ? { resolvedByUserId: correctedByUserId, resolvedAt: new Date() }
+        : {
+            resolvedByUserId: null,
+            resolvedAt: null,
+            resolvedByDocumentId: null,
+            resolvedByRepositoryFileId: null,
+            resolvedByRepositoryFilePath: null,
+            resolvedBySymbolId: null,
+            resolutionEvidence: Prisma.DbNull,
+          };
+
     return this.prisma.projectActionItem.update({
       where: { id: actionItem.id },
       data: {
         status,
         statusSource: ProjectActionItemStatusSource.manual,
         origin: ProjectDataOrigin.human,
-        resolvedByUserId: correctedByUserId,
-        resolvedAt: new Date(),
+        ...resolution,
       },
     });
   }

@@ -488,14 +488,14 @@ export class AgentToolsService {
       const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
       // build SQL query with vector search
-      // Join with Document (for documentType) and Repository (for repositoryType) to get the source type
+      // a RepositoryFile's source type comes from its Repository; it has no ProjectDocument of its own
       const documentTypeFilter =
-        documentTypes && documentTypes.length > 0
-          ? `AND (d."documentType"::text = ANY($3::text[]) OR r."type"::text = ANY($3::text[]))`
-          : "";
+        documentTypes && documentTypes.length > 0 ? `AND r."type"::text = ANY($4::text[])` : "";
 
       const params =
-        documentTypes && documentTypes.length > 0 ? [embeddingStr, topK, documentTypes] : [embeddingStr, topK];
+        documentTypes && documentTypes.length > 0
+          ? [projectId, embeddingStr, topK, documentTypes]
+          : [projectId, embeddingStr, topK];
 
       const results = await this.prisma.$queryRawUnsafe<
         {
@@ -514,19 +514,18 @@ export class AgentToolsService {
           p.name as "projectName",
           cf."fullPath" as path,
           dir.summary as "directorySummary",
-          COALESCE(d."documentType"::text, r."type"::text) as "documentType",
+          r."type"::text as "documentType",
           cf.summary,
-          1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
+          1 - (cf."summaryEmbedding" <=> $2::halfvec) as similarity
         FROM "RepositoryFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
         LEFT JOIN "RepositoryDirectory" dir ON cf."directoryId" = dir.id
-        LEFT JOIN "ProjectDocument" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
-        WHERE cf."projectId" = '${projectId}'
+        WHERE cf."projectId" = $1::uuid
           AND cf."summaryEmbedding" IS NOT NULL
           ${documentTypeFilter}
-        ORDER BY cf."summaryEmbedding" <=> $1::halfvec
-        LIMIT $2
+        ORDER BY cf."summaryEmbedding" <=> $2::halfvec
+        LIMIT $3
       `,
         ...params,
       );
@@ -587,9 +586,7 @@ export class AgentToolsService {
       const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
       const hasDocTypeFilter = documentTypes && documentTypes.length > 0;
-      const documentTypeFilter = hasDocTypeFilter
-        ? `AND (d."documentType"::text = ANY($4::text[]) OR r."type"::text = ANY($4::text[]))`
-        : "";
+      const documentTypeFilter = hasDocTypeFilter ? `AND r."type"::text = ANY($4::text[])` : "";
 
       const params = hasDocTypeFilter
         ? [embeddingStr, topK, projectIds, documentTypes]
@@ -614,13 +611,12 @@ export class AgentToolsService {
           p.summary as "projectSummary",
           cf."fullPath" as path,
           dir.summary as "directorySummary",
-          COALESCE(d."documentType"::text, r."type"::text) as "documentType",
+          r."type"::text as "documentType",
           cf.summary,
           1 - (cf."summaryEmbedding" <=> $1::halfvec) as similarity
         FROM "RepositoryFile" cf
         JOIN "Project" p ON cf."projectId" = p.id
         LEFT JOIN "RepositoryDirectory" dir ON cf."directoryId" = dir.id
-        LEFT JOIN "ProjectDocument" d ON cf."documentId" = d.id
         LEFT JOIN "Repository" r ON cf."repositoryId" = r.id
         WHERE cf."projectId" = ANY($3::uuid[])
           AND cf."summaryEmbedding" IS NOT NULL
