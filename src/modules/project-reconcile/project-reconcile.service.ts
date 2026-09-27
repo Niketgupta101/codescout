@@ -95,10 +95,17 @@ export class ProjectReconcileService {
     >
   > {
     this.logger.log(`Canonicalizing project ${projectId}`);
+    const usageBefore = this.openaiService.usageSnapshot();
+    const startedAt = Date.now();
 
     const { correctionsApplied } = await this.projectCorrectionService.correctionsApply(projectId);
     const { topicsCreated, topicsMatched } = await this._canonicalizeProjectTopics(projectId);
     const { actionItemsCreated, actionItemsMatched } = await this._canonicalizeActionItems(projectId);
+
+    this.logger.log(
+      `Canonicalized project ${projectId} in ${((Date.now() - startedAt) / 60000).toFixed(1)} min: ` +
+        this.openaiService.usageSince(usageBefore).summary,
+    );
 
     return { correctionsApplied, topicsCreated, topicsMatched, actionItemsCreated, actionItemsMatched };
   }
@@ -113,14 +120,32 @@ export class ProjectReconcileService {
     options: { force?: boolean; dryRun?: boolean } = {},
   ): Promise<ProjectActionItemResolveResult> {
     this.logger.log(`Resolving canonical action-item statuses for project ${projectId}`);
+    const usageBefore = this.openaiService.usageSnapshot();
+    const startedAt = Date.now();
 
-    return this._resolveCanonicalActionItemStatus(projectId, options);
+    const result = await this._resolveCanonicalActionItemStatus(projectId, options);
+
+    this.logger.log(
+      `Resolved action items for project ${projectId} in ${((Date.now() - startedAt) / 60000).toFixed(1)} min: ` +
+        this.openaiService.usageSince(usageBefore).summary,
+    );
+
+    return result;
   }
 
   async threadStatements(projectId: string): Promise<{ statementsReconciled: number; supersessionsLinked: number }> {
     this.logger.log(`Threading statements for project ${projectId}`);
+    const usageBefore = this.openaiService.usageSnapshot();
+    const startedAt = Date.now();
 
-    return this._threadStatements(projectId);
+    const result = await this._threadStatements(projectId);
+
+    this.logger.log(
+      `Threaded statements for project ${projectId} in ${((Date.now() - startedAt) / 60000).toFixed(1)} min: ` +
+        this.openaiService.usageSince(usageBefore).summary,
+    );
+
+    return result;
   }
 
   async reconcile(projectId: string): Promise<ProjectReconcileResult> {
@@ -1624,9 +1649,10 @@ export class ProjectReconcileService {
     embedding: number[];
   }): Promise<ActionItemResolutionEvidence> {
     const laterStatements = await this.prisma.$queryRaw<
-      { id: string; textDerived: string; textRaw: string | null; projectDocumentId: string }[]
+      { id: string; textDerived: string; textRaw: string | null; projectDocumentId: string; distance: number }[]
     >`
-      SELECT s.id, s."textDerived", s."textRaw", s."projectDocumentId"
+      SELECT s.id, s."textDerived", s."textRaw", s."projectDocumentId",
+        (s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) AS distance
       FROM "ProjectDocumentStatement" s
       JOIN "ProjectDocument" d ON d.id = s."projectDocumentId"
       WHERE s."projectId" = ${projectId}::uuid
@@ -1638,6 +1664,16 @@ export class ProjectReconcileService {
       ORDER BY s."textDerivedEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec
       LIMIT ${RESOLUTION_CANDIDATE_LIMIT}
     `;
+
+    // RESOLUTION_DOCUMENT_DISTANCE_THRESHOLD and RESOLUTION_CANDIDATE_LIMIT were both set from a single measurement
+    // run, so the observed distances are logged to let them be re-set from the distribution rather than re-guessed
+    this.logger.debug(
+      `Resolution candidates: ${
+        laterStatements.length === 0
+          ? "none within threshold"
+          : laterStatements.map((candidate, rank) => `#${rank + 1} ${candidate.distance.toFixed(3)}`).join(" ")
+      }`,
+    );
 
     const candidates = laterStatements.map((candidate) => ({
       id: candidate.id,

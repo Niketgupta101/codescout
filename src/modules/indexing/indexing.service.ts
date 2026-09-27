@@ -119,6 +119,7 @@ export class IndexingService {
    * @returns Whether the document came out fully processed.
    */
   async projectDocumentProcess(projectDocumentId: string): Promise<boolean> {
+    const usageBefore = this.openaiService.usageSnapshot();
     const indexed = await this.projectDocumentIndex(projectDocumentId);
 
     // indexing already recorded the failure, and the later stages call the same failing provider
@@ -138,6 +139,9 @@ export class IndexingService {
         ? { status: "completed", error: null }
         : { status: "failed", error: "Failed to extract document knowledge" },
     });
+
+    // per-document cost is what a folder import multiplies, so it is reported per document rather than only in total
+    this.logger.log(`Processed document ${projectDocumentId}: ${this.openaiService.usageSince(usageBefore).summary}`);
 
     return extracted;
   }
