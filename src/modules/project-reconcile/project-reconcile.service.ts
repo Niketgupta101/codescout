@@ -19,6 +19,9 @@ import { OpenAIService } from "../openai/openai.service";
 import { ProjectCorrectionService } from "../project-correction/project-correction.service";
 import type { ProjectReconcileResult } from "./types/project-reconcile-result.type";
 import type { ProjectReconcileStatementState } from "./types/project-reconcile-statement-state.type";
+import type { ProjectReconcileTopicPayload } from "./types/project-reconcile-topic-payload.type";
+import type { ProjectReconcileTopicUpdate } from "./types/project-reconcile-topic-update.type";
+import type { OpenAiTopicGroup } from "../openai/types/openai-topic-group.type";
 import type { ActionItemResolutionDecision } from "../openai/types/action-item-resolution-decision.type";
 import type { ActionItemResolutionEvidence } from "./types/action-item-resolution-evidence.type";
 import type { ProjectActionItemResolveResult } from "./types/project-action-item-resolve-result.type";
@@ -62,7 +65,11 @@ const RESOLUTION_EXCLUDED_EVIDENCE_TYPES: ProjectDocumentType[] = [
 const TOPIC_MEMBER_STATEMENT_SAMPLE = 8;
 const TOPIC_GROUPING_BATCH_SIZE = 10;
 const TOPIC_GROUPING_BATCH_TOKENS = 3000;
-const TOPIC_CANDIDATE_LIMIT = 3;
+// the canonical set is meant to stay small and initiative-level, so the whole of it is offered as anchors and any of it
+// can be folded into. offering only the nearest few per doc-topic is what duplicated topics: a canonical topic the model
+// was never shown could not be reused, and each duplicate crowded the others out of that short list, so every run made
+// the next one worse. hitting this cap means canonicalization is no longer consolidating and is warned about
+const TOPIC_ANCHOR_LIMIT = 80;
 
 // Action-item canonicalization must stay bounded as a project grows. Items are processed chronologically so the
 // canonical rows created for one document become anchors for later documents, while both item count and token count
@@ -239,28 +246,16 @@ export class ProjectReconcileService {
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const names = batches[batchIndex];
-      const { embeddings } = await this.openaiService.generateEmbeddings(
-        names.map((name) => [name, ...(projectDocumentStatementsByTopicName.get(name) ?? [])].join("\n")),
-      );
-      const candidateSets = await this._mapWithConcurrency(names, 4, (_, nameIndex) =>
-        this._findNearestTopicAnchors({ projectId, embedding: embeddings[nameIndex] }),
-      );
-      const candidateIds = [...new Set(candidateSets.flat().map((candidate) => candidate.id))];
-      const projectTopicsExisting =
-        candidateIds.length > 0
-          ? await this.prisma.projectTopic.findMany({ where: { projectId, id: { in: candidateIds } } })
-          : [];
-      const candidateTopicIdsByName = new Map(
-        names.map((name, nameIndex) => [name, candidateSets[nameIndex].map((candidate) => candidate.id)]),
-      );
+      // re-read every batch: a topic created by the previous batch has to be foldable into by this one
+      const projectTopicsExisting = await this._findProjectTopicAnchors(projectId);
+
       this.logger.log(
-        `Topic batch ${batchIndex + 1}/${batches.length}: grouping ${names.length} topic(s) against ${projectTopicsExisting.length} candidate anchor(s)`,
+        `Topic batch ${batchIndex + 1}/${batches.length}: grouping ${names.length} topic(s) against ${projectTopicsExisting.length} existing topic(s)`,
       );
-      const { newTopicPayloads, matches } = await this._createOrLinkProjectTopics({
+      const { newTopicPayloads, matches, topicUpdates } = await this._createOrLinkProjectTopics({
         projectDocumentTopicNamesDistinct: names,
         projectDocumentStatementsByTopicName,
         projectTopicsExisting,
-        candidateTopicIdsByName,
       });
       const topicIdByName = new Map<string, string>();
 
@@ -287,6 +282,21 @@ export class ProjectReconcileService {
             }
           }
 
+          // a topic that absorbed new members no longer describes only what it was created for, so the summary the model
+          // wrote for the merged group replaces it - and is re-embedded, since that embedding is what later runs fold on
+          for (const topicUpdate of topicUpdates) {
+            await tx.projectTopic.update({
+              where: { id: topicUpdate.topicId },
+              data: { summary: topicUpdate.summary, type: topicUpdate.type, nameAliases: topicUpdate.nameAliases },
+            });
+
+            await tx.$executeRaw`
+              UPDATE "ProjectTopic"
+              SET "summaryEmbedding" = ${`[${topicUpdate.embedding.join(",")}]`}::halfvec
+              WHERE id = ${topicUpdate.topicId}::uuid
+            `;
+          }
+
           for (const [name, topicId] of topicIdByName) {
             const updated = await tx.projectDocumentTopic.updateMany({
               where: { projectId, projectTopicId: null, name },
@@ -300,7 +310,7 @@ export class ProjectReconcileService {
 
       topicsCreated += newTopicPayloads.length;
       this.logger.log(
-        `Topic batch ${batchIndex + 1}/${batches.length}: placed ${names.length}, matched ${matches.length}, created ${newTopicPayloads.length}`,
+        `Topic batch ${batchIndex + 1}/${batches.length}: placed ${names.length}, folded into ${matchedTopicIds.size} existing, created ${newTopicPayloads.length}, resummarized ${topicUpdates.length}`,
       );
     }
 
@@ -366,67 +376,55 @@ export class ProjectReconcileService {
     return statementsByName;
   }
 
-  async _findNearestTopicAnchors({
-    projectId,
-    embedding,
-  }: {
-    projectId: string;
-    embedding: number[];
-  }): Promise<{ id: string; name: string; summary: string | null; distance: number }[]> {
-    const rows = await this.prisma.$queryRaw<{ id: string; name: string; summary: string | null; distance: number }[]>`
-      SELECT id, name, summary, ("summaryEmbedding" <=> ${`[${embedding.join(",")}]`}::halfvec) AS distance
-      FROM "ProjectTopic"
-      WHERE "projectId" = ${projectId}::uuid
-        AND "summaryEmbedding" IS NOT NULL
-      ORDER BY distance ASC
-      LIMIT ${TOPIC_CANDIDATE_LIMIT}
-    `;
+  // suppressed topics are left out: folding new members into one would hide them behind a deliberate hide. oldest first,
+  // so if the cap ever truncates it keeps the established topics that ids are already pointing at
+  async _findProjectTopicAnchors(projectId: string): Promise<ProjectTopic[]> {
+    const projectTopics = await this.prisma.projectTopic.findMany({
+      where: { projectId, suppressed: false },
+      orderBy: { createdAt: "asc" },
+      take: TOPIC_ANCHOR_LIMIT,
+    });
 
-    return rows;
+    if (projectTopics.length === TOPIC_ANCHOR_LIMIT) {
+      this.logger.warn(
+        `Project ${projectId} has at least ${TOPIC_ANCHOR_LIMIT} canonical topics, so some are no longer offered as fold-in targets - canonicalization has stopped consolidating`,
+      );
+    }
+
+    return projectTopics;
   }
 
   async _createOrLinkProjectTopics({
     projectDocumentTopicNamesDistinct,
     projectDocumentStatementsByTopicName,
     projectTopicsExisting,
-    candidateTopicIdsByName,
   }: {
     projectDocumentTopicNamesDistinct: string[];
     projectDocumentStatementsByTopicName: Map<string, string[]>;
     projectTopicsExisting: ProjectTopic[];
-    candidateTopicIdsByName: Map<string, string[]>;
   }): Promise<{
-    newTopicPayloads: {
-      name: string;
-      type: ProjectTopicType | null;
-      summary: string;
-      embedding: number[];
-      memberNames: string[];
-    }[];
+    newTopicPayloads: ProjectReconcileTopicPayload[];
     matches: { name: string; topicId: string }[];
+    topicUpdates: ProjectReconcileTopicUpdate[];
   }> {
     const { groups } = await this.openaiService.createProjectDocumentTopicGroups({
       projectTopicsExisting: projectTopicsExisting,
       projectDocumentTopics: projectDocumentTopicNamesDistinct.map((name) => ({
         name,
         statements: projectDocumentStatementsByTopicName.get(name) ?? [],
-        candidateTopicIds: candidateTopicIdsByName.get(name) ?? [],
       })),
     });
 
     const projectDocumentTopicNamesDistinctSet = new Set(projectDocumentTopicNamesDistinct);
-    const projectTopicExistingIds = new Set(projectTopicsExisting.map((topic) => topic.id));
+    const projectTopicExistingById = new Map(projectTopicsExisting.map((topic) => [topic.id, topic]));
+    const projectTopicExistingByName = new Map(projectTopicsExisting.map((topic) => [topic.name, topic]));
     const placedNames = new Set<string>();
-    const newTopicPayloads: {
-      name: string;
-      type: ProjectTopicType | null;
-      summary: string;
-      embedding: number[];
-      memberNames: string[];
-    }[] = [];
+    const newTopicPayloads: ProjectReconcileTopicPayload[] = [];
     const matches: { name: string; topicId: string }[] = [];
+    // keyed by topic so two groups folding into one topic resolve to a single rewrite rather than racing each other
+    const topicUpdatesByTopicId = new Map<string, ProjectReconcileTopicUpdate>();
 
-      // keep only real input names per group (the model can echo or invent), each placed once
+    // keep only real input names per group (the model can echo or invent), each placed once
     for (const group of groups) {
       const memberNames = [...new Set(group.memberNames)].filter(
         (name) => projectDocumentTopicNamesDistinctSet.has(name) && !placedNames.has(name),
@@ -438,25 +436,48 @@ export class ProjectReconcileService {
 
       memberNames.forEach((name) => placedNames.add(name));
 
-      // fold into an existing canonical topic when the model matched one; its summary is left untouched
-      const matchesEveryMembersCandidateSet = Boolean(
-        group.matchTopicId &&
-          memberNames.every((name) => candidateTopicIdsByName.get(name)?.includes(group.matchTopicId!)),
-      );
+      const type = (Object.values(ProjectTopicType) as string[]).includes(group.type ?? "")
+        ? (group.type as ProjectTopicType)
+        : null;
+      const projectTopicMatched = group.matchTopicId ? projectTopicExistingById.get(group.matchTopicId) : undefined;
 
-      if (group.matchTopicId && projectTopicExistingIds.has(group.matchTopicId) && matchesEveryMembersCandidateSet) {
+      // fold into the existing canonical topic the model picked, and rewrite it to describe what it now covers
+      if (projectTopicMatched) {
         for (const name of memberNames) {
-          matches.push({ name, topicId: group.matchTopicId });
+          matches.push({ name, topicId: projectTopicMatched.id });
+        }
+
+        const topicUpdate = await this._buildProjectTopicUpdate({ projectTopicMatched, group, type });
+
+        if (topicUpdate) {
+          topicUpdatesByTopicId.set(projectTopicMatched.id, topicUpdate);
+        }
+
+        continue;
+      }
+
+      // the model proposed a new topic under a name that already exists, so that topic is the one it meant
+      const projectTopicWithSameName = projectTopicExistingByName.get(group.name);
+
+      if (projectTopicWithSameName) {
+        for (const name of memberNames) {
+          matches.push({ name, topicId: projectTopicWithSameName.id });
+        }
+
+        const topicUpdate = await this._buildProjectTopicUpdate({
+          projectTopicMatched: projectTopicWithSameName,
+          group,
+          type,
+        });
+
+        if (topicUpdate) {
+          topicUpdatesByTopicId.set(projectTopicWithSameName.id, topicUpdate);
         }
 
         continue;
       }
 
       // otherwise this is a new canonical topic - embed its summary so future runs can fold into it
-      const type = (Object.values(ProjectTopicType) as string[]).includes(group.type ?? "")
-        ? (group.type as ProjectTopicType)
-        : null;
-
       const { embedding } = await this.openaiService.generateEmbedding({ input: group.summary });
 
       newTopicPayloads.push({ name: group.name, type, summary: group.summary, embedding, memberNames });
@@ -470,6 +491,15 @@ export class ProjectReconcileService {
 
       placedNames.add(name);
 
+      // an identically named canonical topic is that name's topic; there is no model judgment here to respect, since
+      // this path only runs because the model left the name out, so it is linked rather than duplicated
+      const projectTopicWithSameName = projectTopicExistingByName.get(name);
+
+      if (projectTopicWithSameName) {
+        matches.push({ name, topicId: projectTopicWithSameName.id });
+        continue;
+      }
+
       const { embedding } = await this.openaiService.generateEmbedding({
         input: [name, ...(projectDocumentStatementsByTopicName.get(name) ?? [])].join("\n"),
       });
@@ -477,7 +507,47 @@ export class ProjectReconcileService {
       newTopicPayloads.push({ name, type: null, summary: name, embedding, memberNames: [name] });
     }
 
-    return { newTopicPayloads, matches };
+    return { newTopicPayloads, matches, topicUpdates: [...topicUpdatesByTopicId.values()] };
+  }
+
+  /**
+   * Builds the rewritten summary for a canonical topic that absorbed new members, or null when nothing should change.
+   * A human-owned topic is never rewritten, and an unchanged summary is not re-embedded.
+   */
+  async _buildProjectTopicUpdate({
+    projectTopicMatched,
+    group,
+    type,
+  }: {
+    projectTopicMatched: ProjectTopic;
+    group: OpenAiTopicGroup;
+    type: ProjectTopicType | null;
+  }): Promise<ProjectReconcileTopicUpdate | null> {
+    // a person renamed or retyped this topic, so canonicalization must leave its wording alone
+    if (projectTopicMatched.origin === ProjectDataOrigin.human) {
+      return null;
+    }
+
+    if (group.summary === projectTopicMatched.summary) {
+      return null;
+    }
+
+    // the name the model would have given the merged topic is kept as an alias rather than renaming the topic, so ids
+    // stay recognizable while the alternative wording is still on record
+    const nameAliases =
+      group.name === projectTopicMatched.name || projectTopicMatched.nameAliases.includes(group.name)
+        ? projectTopicMatched.nameAliases
+        : [...projectTopicMatched.nameAliases, group.name];
+
+    const { embedding } = await this.openaiService.generateEmbedding({ input: group.summary });
+
+    return {
+      topicId: projectTopicMatched.id,
+      type: type ?? projectTopicMatched.type,
+      summary: group.summary,
+      nameAliases,
+      embedding,
+    };
   }
 
   /**

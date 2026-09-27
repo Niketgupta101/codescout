@@ -230,9 +230,10 @@ const TOPIC_GROUPING_SYSTEM_PROMPT =
   "You organize a project's doc-topics into a very small set of broad, initiative-level canonical topics. You are given " +
   "the project's existing canonical topics (id, name, summary) and new doc-topic names, each with a few statements. " +
   "Place every input name in exactly one group: if it belongs to an existing canonical topic, fold it in by setting " +
-  "matchTopicId to an id listed in that input's candidate ids. Never match an input to an existing id outside its " +
-  "candidate list. Otherwise group it with related new names into a new topic (matchTopicId null) with " +
-  "a clean, broad name, its type from the allowed set, and a one- or two-sentence summary. Consolidate aggressively: " +
+  "matchTopicId to that topic's id, which must be one of the listed existing ids. Otherwise group it with related new " +
+  "names into a new topic (matchTopicId null) with a clean, broad name and its type from the allowed set. Always write " +
+  "summary as one or two sentences describing the whole resulting topic, covering the folded-in members as well as what " +
+  "an existing topic already described - on a fold-in it replaces that topic's summary. Consolidate aggressively: " +
   "fold related technical subjects, configurations, tests, diagnostics, and statuses into the one initiative they " +
   "serve, and absorb isolated details into the broader theme rather than giving them their own topic. Prefer folding " +
   "into an existing topic over creating a near-duplicate, and only open a new topic for a genuinely independent " +
@@ -1331,7 +1332,7 @@ export class OpenAIService {
     const projectDocumentTopicsPromptSection = projectDocumentTopics
       .map(
         (topic) =>
-          `- ${topic.name} [candidate ids: ${topic.candidateTopicIds?.length ? topic.candidateTopicIds.join(", ") : "none"}]` +
+          `- ${topic.name}` +
           (topic.statements.length
             ? `\n${topic.statements.map((statement) => `    ${statement}`).join("\n")}`
             : ""),
