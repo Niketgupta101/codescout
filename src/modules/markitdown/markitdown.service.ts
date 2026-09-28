@@ -76,6 +76,7 @@ export class MarkitdownService {
 
       // xlsx types a worksheet's cell lookup as any, so it is read through a typed view of the same object
       const cellsByAddress: Record<string, XLSX.CellObject | undefined> = sheet;
+      let populatedRange: XLSX.Range | null = null;
 
       for (const address of Object.keys(sheet)) {
         const cell = cellsByAddress[address];
@@ -83,6 +84,15 @@ export class MarkitdownService {
         if (address.startsWith("!") || !cell) {
           continue;
         }
+
+        const { r, c } = XLSX.utils.decode_cell(address);
+
+        populatedRange = populatedRange
+          ? {
+              s: { r: Math.min(populatedRange.s.r, r), c: Math.min(populatedRange.s.c, c) },
+              e: { r: Math.max(populatedRange.e.r, r), c: Math.max(populatedRange.e.c, c) },
+            }
+          : { s: { r, c }, e: { r, c } };
 
         const cellFormat = typeof cell.z === "string" ? cell.z : null;
 
@@ -92,6 +102,16 @@ export class MarkitdownService {
           cell.w = workbookNumberFormatter.format(WORKBOOK_DATE_FORMAT, cell.v);
         }
       }
+
+      // a sheet that once carried whole-row or whole-column formatting keeps the declared range it had then, so !ref can
+      // read A1:XFD1048576 over eight rows of data. sheet_to_html emits a cell per coordinate in the declared range
+      // rather than per populated cell, which turns a 12kb file into billions of table cells and exhausts the heap, so
+      // the range is clamped to the cells that actually exist before rendering
+      if (!populatedRange) {
+        continue;
+      }
+
+      sheet["!ref"] = XLSX.utils.encode_range(populatedRange);
 
       const sheetHtml = XLSX.utils.sheet_to_html(sheet);
       const converted = await this.markItDown.convertBuffer(Buffer.from(sheetHtml, "utf8"), {
