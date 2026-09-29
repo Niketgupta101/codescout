@@ -6,6 +6,8 @@ import type { GoogleDriveFile } from "./types/google-drive-file.type";
 import type { GoogleServiceAccountCredentials } from "./types/google-service-account-credentials.type";
 
 const DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+// a shortcut carries the target's name but none of its bytes, so it is resolved to the target before anything reads it
+const DRIVE_SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 // drive file/folder ids are url-safe; reject anything else so an id can't break out of the search query
 const DRIVE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -188,19 +190,51 @@ export class GoogleDriveService {
     return google.drive({ version: "v3", auth });
   }
 
+  // only what change detection needs; a target that cannot be read is reported as unknown rather than failing the listing
+  async _fileMetadataGet(fileMetadataGetInput: {
+    drive: drive_v3.Drive;
+    fileId: string;
+  }): Promise<{ modifiedAt: Date | null; sizeBytes: number | null }> {
+    const { drive, fileId } = fileMetadataGetInput;
+
+    try {
+      const { data } = await drive.files.get({ fileId, fields: "modifiedTime, size", supportsAllDrives: true });
+
+      return {
+        modifiedAt: data.modifiedTime ? new Date(data.modifiedTime) : null,
+        sizeBytes: data.size ? Number(data.size) : null,
+      };
+    } catch (error) {
+      this.logger.warn(`Could not read Google Drive file ${fileId} metadata, treating it as changed`, error);
+
+      return { modifiedAt: null, sizeBytes: null };
+    }
+  }
+
   async _listFolderRecursive(listFolderRecursiveInput: {
     drive: drive_v3.Drive;
     folderId: string;
     parentPath: string;
+    visitedFolderIds?: Set<string>;
   }): Promise<GoogleDriveFile[]> {
     const { drive, folderId, parentPath } = listFolderRecursiveInput;
+    // real folders form a tree, but a shortcut can point back at an ancestor - without this a cycle lists forever
+    const visitedFolderIds = listFolderRecursiveInput.visitedFolderIds ?? new Set<string>();
+
+    if (visitedFolderIds.has(folderId)) {
+      this.logger.warn(`Google Drive folder ${folderId} is reachable from itself via a shortcut, so it is listed once`);
+      return [];
+    }
+
+    visitedFolderIds.add(folderId);
+
     const files: GoogleDriveFile[] = [];
     let pageToken: string | undefined = undefined;
 
     do {
       const { data }: { data: drive_v3.Schema$FileList } = await drive.files.list({
         q: `'${folderId}' in parents and trashed = false`,
-        fields: "nextPageToken, files(id, name, mimeType, modifiedTime, size)",
+        fields: "nextPageToken, files(id, name, mimeType, modifiedTime, size, shortcutDetails(targetId, targetMimeType))",
         pageSize: 1000,
         pageToken,
         // without these a folder on a shared drive lists as empty instead of erroring, which reads as "nothing to import"
@@ -217,19 +251,42 @@ export class GoogleDriveService {
         }
 
         const entryPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+        const isShortcut = entry.mimeType === DRIVE_SHORTCUT_MIME_TYPE;
 
-        if (entry.mimeType === DRIVE_FOLDER_MIME_TYPE) {
-          const nestedFiles = await this._listFolderRecursive({ drive, folderId: entry.id, parentPath: entryPath });
+        // a shortcut serves no bytes of its own, so everything downstream addresses the target instead: the target's id
+        // is what the document stores, which is what makes the same file resolve to one document whether it is reached
+        // through a shortcut, through its own folder, or through both
+        const targetId = isShortcut ? entry.shortcutDetails?.targetId : entry.id;
+        const targetMimeType = isShortcut ? entry.shortcutDetails?.targetMimeType : entry.mimeType;
+
+        // a shortcut whose target was deleted keeps existing and resolves to nothing
+        if (!targetId) {
+          this.logger.warn(`Google Drive shortcut ${entryPath} has no target, so it is skipped`);
+          continue;
+        }
+
+        if (targetMimeType === DRIVE_FOLDER_MIME_TYPE) {
+          const nestedFiles = await this._listFolderRecursive({
+            drive,
+            folderId: targetId,
+            parentPath: entryPath,
+            visitedFolderIds,
+          });
           files.push(...nestedFiles);
         } else {
+          // a shortcut's own modifiedTime tracks the shortcut, not the file, so reusing it would leave an edited target
+          // looking unchanged forever - the target's metadata is fetched instead, one call per shortcut
+          const target = isShortcut ? await this._fileMetadataGet({ drive, fileId: targetId }) : null;
+
           files.push({
-            id: entry.id,
+            id: targetId,
+            // the name stays the shortcut's, since that is what a person sees and names the document in the folder
             name: entry.name,
-            mimeType: entry.mimeType ?? "",
+            mimeType: targetMimeType ?? "",
             path: entryPath,
             parentId: folderId,
-            modifiedAt: entry.modifiedTime ? new Date(entry.modifiedTime) : null,
-            sizeBytes: entry.size ? Number(entry.size) : null,
+            modifiedAt: target ? target.modifiedAt : entry.modifiedTime ? new Date(entry.modifiedTime) : null,
+            sizeBytes: target ? target.sizeBytes : entry.size ? Number(entry.size) : null,
           });
         }
       }
